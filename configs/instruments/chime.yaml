@@ -1,0 +1,23 @@
+instrument: CHIME
+location:
+  latitude_deg: 49.321
+  longitude_deg: -119.624
+
+observing:
+  freq_low_mhz: 400.0
+  freq_high_mhz: 800.0
+  n_freq_chans: 16384
+  t_samp_ms: 0.98304
+  tsys_approx_k: 50.0
+  beam_fwhm_deg: 1.3
+
+pipeline:
+  rfi_threshold_sigma: 3.0
+  dm_min: 0.0
+  dm_max: 13000.0
+  dm_step: 0.1
+
+catalog:
+  version: 1
+  url: https://raw.githubusercontent.com/CHIMEFRB/catalog1/main/data/catalog1.csv
+  injection_calibration: true

@@ -1,0 +1,31 @@
+instrument: EHT
+observing_frequency_ghz: 230.0
+bandwidth_ghz: 2.0
+data_release: 2017
+
+stations:
+  ALMA: {latitude_deg: -23.029, longitude_deg: -67.754, sefd_jy: 110}
+  APEX: {latitude_deg: -23.007, longitude_deg: -67.759, sefd_jy: 4700}
+  JCMT: {latitude_deg: 19.823, longitude_deg: -155.477, sefd_jy: 11900}
+  LMT:  {latitude_deg: 18.986, longitude_deg: -97.315, sefd_jy: 1400}
+  SMA:  {latitude_deg: 19.824, longitude_deg: -155.478, sefd_jy: 9600}
+  SMTO: {latitude_deg: 32.701, longitude_deg: -109.871, sefd_jy: 12000}
+  SPT:  {latitude_deg: -89.991, longitude_deg: -44.650, sefd_jy: 12000}
+  IRAM30: {latitude_deg: 37.067, longitude_deg: -3.392, sefd_jy: 2900}
+
+targets:
+  M87:
+    ra_deg: 187.706
+    dec_deg: 12.391
+    shadow_diameter_muas: 42.0  # from 2019 papers
+
+imaging:
+  fov_muas: 200.0
+  n_pixels: 128
+  beam_fwhm_muas: 20.0
+  thermal_noise_jy: 0.05
+
+likelihood:
+  use_closure_phases: true
+  closure_kappa: 10.0
+  robust_data: false

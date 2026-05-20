@@ -1,0 +1,40 @@
+run:
+  label: radio_pbh_chime
+  model: pbh_tunneling
+  channel: radio
+  data_source: chime_frb
+  sampler: dynesty
+  nlive: 500
+  seed: 42
+  outdir: artifacts/bilby
+  resume: true
+
+instrument:
+  freq_low_mhz: 400.0
+  freq_high_mhz: 800.0
+  n_freq_chans: 64
+  t_start_s: 0.1
+  t_end_s: 0.5
+  n_time_bins: 2048
+  tsys_jy: 1000.0
+  t_samp_ms: 0.1
+
+comparison_models:
+  - null
+  - magnetar
+  - grb_frb
+
+gates:
+  internal:
+    ln_BF_vs_null: 3.0
+    ln_BF_vs_alt: 1.0
+  publication:
+    ln_BF_vs_null: 5.0
+    ln_BF_vs_alt: 3.0
+    fpr: 1.0e-3
+
+validation:
+  n_injections: 200
+  n_sbc_simulations: 1000
+  n_ppc_replicates: 200
+  n_null_windows: 100

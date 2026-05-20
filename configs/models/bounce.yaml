@@ -1,0 +1,90 @@
+model: BlackToWhiteBounce
+channel: gw
+description: >
+  Black-to-white bounce model. GW ringdown deviates from GR predictions;
+  optional bounce burst appears at tau_bounce after the merger.
+
+parameters:
+  M:
+    prior: log_uniform
+    low: 5.0
+    high: 1000.0
+    unit: M_sun
+    description: Initial black hole mass at merger
+    latex: "$M$"
+
+  a_star:
+    prior: uniform
+    low: 0.0
+    high: 0.998
+    unit: dimensionless
+    description: Dimensionless spin
+    latex: "$a_*$"
+
+  log10_tau_bounce_yr:
+    prior: uniform
+    low: -3.0
+    high: 10.0
+    unit: log10(yr)
+    description: Log10 conversion timescale in years
+    latex: "$\\log_{10}(\\tau_b/\\mathrm{yr})$"
+
+  log10_ell_q:
+    prior: uniform
+    low: 0.0
+    high: 6.0
+    unit: log10(l_Planck)
+    description: Log10 quantum length scale
+    latex: "$\\log_{10}(\\ell_q/l_P)$"
+
+  p_lifetime:
+    prior: discrete_uniform
+    values: [4, 5]
+    description: Lifetime scaling exponent (tau ~ k M^p)
+
+  eps_f:
+    prior: uniform
+    low: -0.3
+    high: 0.3
+    unit: dimensionless
+    description: Fractional frequency deviation from GR
+
+  eps_Q:
+    prior: uniform
+    low: -0.5
+    high: 0.5
+    unit: dimensionless
+    description: Fractional quality factor deviation from GR
+
+  log10_A_bounce:
+    prior: uniform
+    low: -25.0
+    high: -18.0
+    unit: log10(strain)
+    description: Log10 peak strain of the bounce burst
+
+  D_L:
+    prior: volume_uniform
+    low: 10.0
+    high: 10000.0
+    unit: Mpc
+    description: Luminosity distance
+
+  i:
+    prior: cos_uniform
+    unit: rad
+    description: Inclination angle
+
+  eta_r:
+    prior: log_uniform
+    low: 1.0e-10
+    high: 1.0
+    unit: dimensionless
+    description: Radio emission efficiency
+
+  eta_gamma:
+    prior: log_uniform
+    low: 1.0e-10
+    high: 1.0
+    unit: dimensionless
+    description: Gamma-ray emission efficiency

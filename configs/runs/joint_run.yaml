@@ -1,0 +1,35 @@
+run:
+  label: joint_three_channel
+  channels: [gw, radio, xray]
+  sampler: dynesty
+  nlive: 1000
+  seed: 42
+  outdir: artifacts/bilby
+  resume: true
+
+channel_weights:
+  gw: 1.0
+  radio: 1.0
+  xray: 1.0
+
+ablation:
+  enabled: true
+  variants:
+    - channels: [gw]
+    - channels: [radio]
+    - channels: [xray]
+    - channels: [gw, radio]
+    - channels: [gw, xray]
+    - channels: [radio, xray]
+
+gates:
+  internal:
+    ln_BF_vs_null: 3.0
+    ln_BF_vs_best_alt: 1.0
+  publication:
+    ln_BF_vs_null: 5.0
+    ln_BF_vs_best_alt: 3.0
+    fpr: 1.0e-3
+    sbc_coverage_min: 0.85
+    sbc_coverage_max: 0.95
+    reproducibility_nat: 0.2

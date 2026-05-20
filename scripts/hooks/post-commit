@@ -1,0 +1,7 @@
+#!/bin/sh
+# 每次 commit 後自動 push 到 GitHub（失敗時不阻擋 commit）
+remote="${WHITESEARCH_REMOTE:-origin}"
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+
+git push "$remote" "$branch" 2>/dev/null || \
+  echo "[whitesearch] auto-push skipped (no network or remote not set)"

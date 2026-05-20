@@ -1,0 +1,35 @@
+instrument: LIGO
+detectors:
+  H1:
+    name: LIGO Hanford
+    latitude_deg: 46.455
+    longitude_deg: -119.408
+    elevation_m: 142.554
+    arm_az_deg: 125.999
+    sample_rate: 4096
+  L1:
+    name: LIGO Livingston
+    latitude_deg: 30.563
+    longitude_deg: -90.774
+    elevation_m: -6.574
+    arm_az_deg: 197.716
+    sample_rate: 4096
+  V1:
+    name: Virgo
+    latitude_deg: 43.631
+    longitude_deg: 10.504
+    elevation_m: 51.884
+    arm_az_deg: 70.567
+    sample_rate: 4096
+
+observation_runs:
+  O3a: {start: 1238166018, end: 1253977218}
+  O3b: {start: 1256655618, end: 1269363618}
+  O4a: {start: 1369512017, end: 1385424017}
+
+preprocessing:
+  low_freq_cutoff: 20.0
+  high_freq_cutoff: 1700.0
+  fft_length: 4.0
+  psd_overlap: 0.5
+  notch_lines: [60, 120, 180, 240, 300, 500, 1000, 36.7, 37.3]

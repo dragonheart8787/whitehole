@@ -1,0 +1,66 @@
+model: PBHTunnelingWhiteHole
+channel: radio
+description: >
+  Primordial Black Hole quantum tunneling to white hole.
+  Primary observable: coherent radio burst (FRB-like) + MeV gamma-ray.
+
+parameters:
+  log10_M_g:
+    prior: uniform
+    low: 13.0   # log10(grams)
+    high: 16.0
+    unit: log10(g)
+
+  log10_f_pbh:
+    prior: uniform
+    low: -10.0
+    high: 0.0
+    unit: log10(dimensionless)
+
+  log10_k_tunnel:
+    prior: uniform
+    low: -3.0
+    high: 3.0
+    unit: log10(dimensionless)
+
+  log10_eta_r:
+    prior: uniform
+    low: -10.0
+    high: 0.0
+    unit: log10(dimensionless)
+
+  log10_eta_gamma:
+    prior: uniform
+    low: -10.0
+    high: 0.0
+    unit: log10(dimensionless)
+
+  z:
+    prior: log_uniform
+    low: 1.0e-4
+    high: 5.0
+    unit: dimensionless
+
+  DM_host:
+    prior: log_uniform
+    low: 1.0
+    high: 1000.0
+    unit: pc/cm^3
+
+  log10_W_int_ms:
+    prior: uniform
+    low: -1.0
+    high: 3.0
+    unit: log10(ms)
+
+  log10_tau_sc_ms:
+    prior: uniform
+    low: -2.0
+    high: 2.0
+    unit: log10(ms)
+
+  spectral_index:
+    prior: normal
+    mean: -1.5
+    std: 1.0
+    unit: dimensionless

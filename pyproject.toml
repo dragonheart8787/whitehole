@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whitesearch"
+version = "0.1.0"
+description = "White hole candidate signal search and evidence ranking engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "WhiteSearch Team" }]
+
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.12",
+    "matplotlib>=3.8",
+    "astropy>=6.0",
+    "astroquery>=0.4.7",
+    "pydantic>=2.6",
+    "gwpy>=3.0",
+    "h5py>=3.10",
+    "pandas>=2.2",
+    "PyYAML>=6.0",
+    "click>=8.1",
+    "tqdm>=4.66",
+    "mlflow>=2.11",
+    "dvc>=3.48",
+    "scikit-learn>=1.4",
+    "corner>=2.2",
+]
+
+[project.optional-dependencies]
+inference = [
+    "bilby>=2.2",
+    "dynesty>=2.1",
+]
+gw = [
+    "pycbc>=2.3",
+    "lalsuite>=7.21",
+]
+imaging = [
+    "einsteinpy>=0.4",
+    "ehtim>=1.2",
+]
+hpc = [
+    "snakemake>=8.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "black>=24.0",
+    "ruff>=0.3",
+    "mypy>=1.8",
+    "ipykernel>=6.29",
+    "nbformat>=5.9",
+]
+all = [
+    "whitesearch[inference,gw,imaging,hpc,dev]",
+]
+
+[project.scripts]
+whitesearch = "whitesearch.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+whitesearch = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src/whitesearch"]
+omit = ["tests/*", "notebooks/*"]

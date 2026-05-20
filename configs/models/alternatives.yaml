@@ -1,0 +1,27 @@
+models:
+  - name: null
+    class: NullHypothesis
+    channel: generic
+    description: Pure Gaussian noise; no signal model.
+
+  - name: magnetar
+    class: MagnetarFlare
+    channel: radio
+    description: Magnetar giant flare producing an FRB-like radio burst.
+    gate: must achieve ln_BF(WH/magnetar) > 3 for publication.
+
+  - name: grb_frb
+    class: GRBAfterglowFRB
+    channel: radio
+    description: GRB prompt emission or magnetar-powered FRB.
+
+  - name: bh_ringdown
+    class: StandardBHRingdown
+    channel: gw
+    description: Standard GR black hole ringdown (eps_f = eps_Q = 0).
+    gate: must achieve ln_BF(bounce/bh_ringdown) > 3 for publication.
+
+  - name: bh_accretion
+    class: BHAccretion
+    channel: image
+    description: Standard thin-disk BH accretion.

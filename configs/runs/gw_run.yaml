@@ -1,0 +1,38 @@
+run:
+  label: gw_bounce_O4a
+  model: bounce
+  channel: gw
+  data_source: gwosc
+  sampler: dynesty
+  nlive: 500
+  seed: 42
+  outdir: artifacts/bilby
+  resume: true
+
+instrument:
+  sample_rate: 4096
+  duration: 4.0
+  t_merger: 1.0
+  low_freq_cutoff: 20.0
+  high_freq_cutoff: 1700.0
+  notch_lines: [60, 120, 180, 240, 300, 500, 1000]
+  detectors: [H1, L1]
+
+comparison_models:
+  - null
+  - bh_ringdown
+
+gates:
+  internal:
+    ln_BF_vs_null: 3.0
+    ln_BF_vs_alt: 1.0
+  publication:
+    ln_BF_vs_null: 5.0
+    ln_BF_vs_alt: 3.0
+    fpr: 1.0e-3
+
+validation:
+  n_injections: 100
+  n_sbc_simulations: 500
+  n_ppc_replicates: 200
+  n_null_windows: 100

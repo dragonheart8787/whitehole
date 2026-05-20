@@ -1,0 +1,50 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.env
+.venv
+env/
+venv/
+
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data and artifacts (tracked by DVC)
+artifacts/
+*.tar
+*.tar.gz
+*.zip
+*.hdf5
+*.fits
+*.gwf
+*.txt.gz
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Bilby outputs
+outdir/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

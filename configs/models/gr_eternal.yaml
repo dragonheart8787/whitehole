@@ -1,0 +1,58 @@
+model: GREternalWhiteHole
+channel: image
+description: >
+  GR eternal white hole (Schwarzschild/Kerr maximal extension).
+  Theoretical baseline; primary observable is image/shadow.
+
+parameters:
+  M:
+    prior: log_uniform
+    low: 1.0e6
+    high: 1.0e10
+    unit: M_sun
+
+  a_star:
+    prior: uniform
+    low: 0.0
+    high: 0.998
+    unit: dimensionless
+
+  D_L:
+    prior: log_uniform
+    low: 1.0
+    high: 2000.0
+    unit: Mpc
+
+  i:
+    prior: cos_uniform
+    unit: rad
+
+  position_angle:
+    prior: uniform
+    low: 0.0
+    high: 3.14159
+    unit: rad
+
+  log10_ne:
+    prior: uniform
+    low: -7.0
+    high: 2.0
+    unit: log10(cm^{-3})
+
+  log10_B:
+    prior: uniform
+    low: -9.0
+    high: 0.0
+    unit: log10(Gauss)
+
+  ring_width_frac:
+    prior: log_uniform
+    low: 0.01
+    high: 0.5
+    unit: dimensionless
+
+  log10_brightness:
+    prior: uniform
+    low: -4.0
+    high: 2.0
+    unit: log10(Jy/uas^2)

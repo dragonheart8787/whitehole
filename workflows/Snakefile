@@ -1,0 +1,234 @@
+"""
+WhiteSearch Snakemake workflow — one-command reproducible pipeline.
+
+Usage:
+  snakemake --snakefile workflows/Snakefile --cores 4
+  snakemake --snakefile workflows/Snakefile --cores 4 all_gw
+  snakemake --snakefile workflows/Snakefile --cores 1 --use-singularity  (with Apptainer)
+
+Targets:
+  all         — full three-channel pipeline
+  all_gw      — GW channel only (MVP)
+  all_radio   — radio channel only (MVP)
+  validation  — SBC + PPC + injection/recovery
+  report      — final Markdown report
+"""
+
+import os
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+configfile: "configs/runs/gw_run.yaml"
+
+MODELS   = ["bounce", "bh_ringdown", "null"]
+CHANNELS = ["gw", "radio"]
+N_INJ    = config.get("validation", {}).get("n_injections", 50)
+NLIVE    = config.get("run", {}).get("nlive", 200)
+SEED     = config.get("run", {}).get("seed", 42)
+OUTDIR   = config.get("run", {}).get("outdir", "artifacts/bilby")
+
+# ── Target rules ──────────────────────────────────────────────────────────────
+
+rule all:
+    input:
+        "artifacts/report.md",
+        "artifacts/sensitivity_gw.png",
+        "artifacts/sensitivity_radio.png",
+        "artifacts/sbc_bounce_gw.png",
+
+rule all_gw:
+    input:
+        expand(f"{OUTDIR}/{{model}}_gw_evidence.json", model=MODELS),
+        "artifacts/bayes_factors_gw.csv",
+        "artifacts/injections_gw/summary.csv",
+
+rule all_radio:
+    input:
+        expand(f"{OUTDIR}/{{model}}_radio_evidence.json",
+               model=["pbh_tunneling", "magnetar", "null"]),
+        "artifacts/bayes_factors_radio.csv",
+        "artifacts/injections_radio/summary.csv",
+
+rule validation:
+    input:
+        "artifacts/sbc_bounce_gw.png",
+        "artifacts/ppc_bounce_gw.png",
+        "artifacts/injections_gw/summary.csv",
+
+# ── GW inference ──────────────────────────────────────────────────────────────
+
+rule gw_fit:
+    output:
+        f"{OUTDIR}/{{model}}_gw_evidence.json"
+    params:
+        nlive=NLIVE,
+        seed=SEED,
+    log:
+        f"artifacts/logs/{{model}}_gw_fit.log"
+    shell:
+        """
+        whitesearch fit \
+            --model {wildcards.model} \
+            --channel gw \
+            --data mock \
+            --nlive {params.nlive} \
+            --outdir {OUTDIR} \
+            --seed {params.seed} \
+            > {log} 2>&1
+        """
+
+rule gw_bayes_factors:
+    input:
+        expand(f"{OUTDIR}/{{model}}_gw_evidence.json", model=MODELS),
+    output:
+        "artifacts/bayes_factors_gw.csv",
+    run:
+        import json, pandas as pd
+        rows = []
+        for f in input:
+            with open(f) as fp:
+                data = json.load(fp)
+            rows.append({
+                "model": data.get("label", str(f)),
+                "ln_Z": data.get("log_evidence", float("nan")),
+                "ln_Z_err": data.get("log_evidence_err", float("nan")),
+            })
+        pd.DataFrame(rows).to_csv(output[0], index=False)
+
+# ── Injection/recovery ────────────────────────────────────────────────────────
+
+rule inject_gw:
+    output:
+        "artifacts/injections_gw/summary.csv",
+    params:
+        n_inj=N_INJ,
+        seed=SEED,
+    log:
+        "artifacts/logs/inject_gw.log"
+    shell:
+        """
+        whitesearch inject \
+            --model bounce \
+            --channel gw \
+            --n-injections {params.n_inj} \
+            --outdir artifacts/injections_gw \
+            --seed {params.seed} \
+            > {log} 2>&1
+        """
+
+rule inject_radio:
+    output:
+        "artifacts/injections_radio/summary.csv",
+    params:
+        n_inj=N_INJ,
+        seed=SEED,
+    log:
+        "artifacts/logs/inject_radio.log"
+    shell:
+        """
+        whitesearch inject \
+            --model pbh_tunneling \
+            --channel radio \
+            --n-injections {params.n_inj} \
+            --outdir artifacts/injections_radio \
+            --seed {params.seed} \
+            > {log} 2>&1
+        """
+
+# ── Sensitivity curves ────────────────────────────────────────────────────────
+
+rule sensitivity_gw:
+    output:
+        "artifacts/sensitivity_gw.png",
+    params:
+        n_inj=N_INJ * 2,
+        seed=SEED,
+    shell:
+        """
+        whitesearch sensitivity \
+            --model bounce \
+            --channel gw \
+            --n-injections {params.n_inj} \
+            --outdir artifacts/sensitivity_gw \
+            --seed {params.seed}
+        """
+
+rule sensitivity_radio:
+    output:
+        "artifacts/sensitivity_radio.png",
+    params:
+        n_inj=N_INJ * 2,
+        seed=SEED,
+    shell:
+        """
+        whitesearch sensitivity \
+            --model pbh_tunneling \
+            --channel radio \
+            --n-injections {params.n_inj} \
+            --outdir artifacts/sensitivity_radio \
+            --seed {params.seed}
+        """
+
+# ── SBC ───────────────────────────────────────────────────────────────────────
+
+rule sbc_bounce_gw:
+    output:
+        "artifacts/sbc_bounce_gw.png",
+    run:
+        import numpy as np
+        from whitesearch.models import BlackToWhiteBounce
+        from whitesearch.simulators import GravitationalWaveSimulator
+        from whitesearch.likelihoods import GWLikelihood
+        from whitesearch.inference import BilbyRunner
+        from whitesearch.validation import SBCRunner
+
+        model = BlackToWhiteBounce()
+        sim = GravitationalWaveSimulator()
+        ll = GWLikelihood()
+        runner = BilbyRunner(nlive=50, outdir=f"{OUTDIR}/sbc", seed=SEED)
+        context = {
+            "sample_rate": 4096, "duration": 2.0, "t_merger": 0.5,
+            "low_freq_cutoff": 20.0, "rng_seed": SEED,
+        }
+        sbc = SBCRunner(n_simulations=50, n_posterior_samples=100, rng_seed=SEED)
+        result = sbc.run(model, sim, ll, runner, context)
+        fig = result.plot(save_path=output[0])
+
+# ── PPC ───────────────────────────────────────────────────────────────────────
+
+rule ppc_bounce_gw:
+    output:
+        "artifacts/ppc_bounce_gw.png",
+    run:
+        import numpy as np
+        from whitesearch.models import BlackToWhiteBounce
+        from whitesearch.simulators import GravitationalWaveSimulator
+        from whitesearch.likelihoods import GWLikelihood
+        from whitesearch.inference import BilbyRunner
+        from whitesearch.validation import PosteriorPredictiveCheck
+
+        model = BlackToWhiteBounce()
+        sim = GravitationalWaveSimulator()
+        ll = GWLikelihood()
+        runner = BilbyRunner(nlive=50, outdir=f"{OUTDIR}/ppc", seed=SEED)
+        context = {
+            "sample_rate": 4096, "duration": 2.0, "t_merger": 0.5,
+            "low_freq_cutoff": 20.0, "rng_seed": SEED,
+        }
+        params = model.sample_prior(np.random.default_rng(SEED))
+        obs_data = sim.simulate(params, context, rng=np.random.default_rng(SEED))
+        result = runner.run(ll, obs_data, context, model, label="ppc_run")
+
+        ppc = PosteriorPredictiveCheck(simulator=sim, n_replicates=50, rng_seed=SEED)
+        ppc_result = ppc.run(obs_data, result, context)
+        fig = ppc_result.plot(save_path=output[0])
+
+# ── Report ────────────────────────────────────────────────────────────────────
+
+rule report:
+    input:
+        expand(f"{OUTDIR}/{{model}}_gw_evidence.json", model=MODELS),
+    output:
+        "artifacts/report.md",
+    shell:
+        "whitesearch report --run-dir {OUTDIR} --output {output}"
