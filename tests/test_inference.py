@@ -30,7 +30,7 @@ def radio_sim_data(pbh_params, radio_context):
 @pytest.fixture
 def toy_runner(tmp_path):
     return BilbyRunner(
-        sampler="dynesty",
+        force_toy=True,
         nlive=50,
         outdir=str(tmp_path / "bilby"),
         seed=42,
@@ -68,7 +68,7 @@ class TestBilbyRunner:
     def test_toy_sampler_returns_result(
         self, bounce_params, gw_context, gw_sim_data, tmp_path
     ):
-        runner = BilbyRunner(nlive=50, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=50, outdir=str(tmp_path), seed=0)
         model = BlackToWhiteBounce()
         ll = GWLikelihood()
 
@@ -80,7 +80,7 @@ class TestBilbyRunner:
     def test_posterior_has_correct_columns(
         self, bounce_params, gw_context, gw_sim_data, tmp_path
     ):
-        runner = BilbyRunner(nlive=50, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=50, outdir=str(tmp_path), seed=0)
         model = BlackToWhiteBounce()
         ll = GWLikelihood()
 
@@ -91,7 +91,7 @@ class TestBilbyRunner:
     def test_compare_models_returns_dataframe(
         self, bounce_params, gw_context, gw_sim_data, tmp_path
     ):
-        runner = BilbyRunner(nlive=50, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=50, outdir=str(tmp_path), seed=0)
         bounce = BlackToWhiteBounce()
         std_bh = StandardBHRingdown()
         ll_bounce = GWLikelihood("bounce")
@@ -110,7 +110,7 @@ class TestBayesFactor:
     def test_compute_returns_dict(
         self, bounce_params, gw_context, gw_sim_data, tmp_path
     ):
-        runner = BilbyRunner(nlive=50, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=50, outdir=str(tmp_path), seed=0)
         model = BlackToWhiteBounce()
         null_model = StandardBHRingdown()
         ll = GWLikelihood()
@@ -144,7 +144,7 @@ class TestValidationPipeline:
     ):
         from whitesearch.validation import InjectionRecovery
 
-        runner = BilbyRunner(nlive=20, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=20, outdir=str(tmp_path), seed=0)
         sim = GravitationalWaveSimulator()
         model = BlackToWhiteBounce()
         ll = GWLikelihood()
@@ -159,7 +159,7 @@ class TestValidationPipeline:
     def test_sbc_smoke(self, gw_context, tmp_path):
         from whitesearch.validation import SBCRunner
 
-        runner = BilbyRunner(nlive=20, outdir=str(tmp_path), seed=0)
+        runner = BilbyRunner(force_toy=True, nlive=20, outdir=str(tmp_path), seed=0)
         sim = GravitationalWaveSimulator()
         model = BlackToWhiteBounce()
         ll = GWLikelihood()

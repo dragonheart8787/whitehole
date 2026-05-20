@@ -21,6 +21,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from .provenance import DataLoadError
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -44,6 +46,7 @@ class GWOSCLoader:
         Directory for caching downloaded files.  Defaults to ``./artifacts/gwosc``.
     """
 
+    # Curated subset validated in CI — not full O1–O4a catalogue coverage
     KNOWN_EVENTS = {
         "GW150914": {"detectors": ["H1", "L1"], "gps": 1126259462.4, "duration": 32},
         "GW151226": {"detectors": ["H1", "L1"], "gps": 1135136350.6, "duration": 32},
@@ -51,9 +54,19 @@ class GWOSCLoader:
         "GW200105": {"detectors": ["H1", "L1"], "gps": 1262276512.0, "duration": 32},
     }
 
-    def __init__(self, cache_dir: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+        allow_mock_fallback: bool = False,
+    ) -> None:
         self.cache_dir = Path(cache_dir) if cache_dir else Path("artifacts/gwosc")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.allow_mock_fallback = allow_mock_fallback
+
+    @classmethod
+    def list_validated_events(cls) -> list[str]:
+        """Return event names in the curated validation whitelist."""
+        return list(cls.KNOWN_EVENTS.keys())
 
     # ── Event loading ─────────────────────────────────────────────────────────
 
@@ -118,8 +131,18 @@ class GWOSCLoader:
             return self._load_cache(cache_path)
 
         if not GWPY_AVAILABLE:
-            logger.warning("GWPy unavailable; returning mock strain data for %s.", detector)
-            return self._mock_strain(detector, gps_start, gps_end, sample_rate)
+            reason = "GWPy not installed"
+            if not self.allow_mock_fallback:
+                raise DataLoadError(
+                    f"Cannot load GWOSC strain for {detector}: {reason}. "
+                    "Install gwpy or pass allow_mock_fallback=True (CLI: --allow-mock-fallback).",
+                    requested_source="GWOSC",
+                    reason=reason,
+                )
+            logger.warning("GWPy unavailable; MOCK_FALLBACK for %s.", detector)
+            return self._mock_strain_fallback(
+                detector, gps_start, gps_end, sample_rate, reason=reason
+            )
 
         try:
             logger.info("Downloading %s %s–%s from GWOSC …", detector, gps_start, gps_end)
@@ -150,8 +173,17 @@ class GWOSCLoader:
             return record
 
         except Exception as exc:
-            logger.error("GWOSC download failed: %s. Returning mock data.", exc)
-            return self._mock_strain(detector, gps_start, gps_end, sample_rate)
+            reason = f"GWOSC download failed: {exc}"
+            if not self.allow_mock_fallback:
+                raise DataLoadError(
+                    reason,
+                    requested_source="GWOSC",
+                    reason=str(exc),
+                ) from exc
+            logger.error("%s; using MOCK_FALLBACK.", reason)
+            return self._mock_strain_fallback(
+                detector, gps_start, gps_end, sample_rate, reason=str(exc)
+            )
 
     def _get_dq_flags(
         self,
@@ -216,7 +248,22 @@ class GWOSCLoader:
         gps_end: float,
         sample_rate: float,
     ) -> dict[str, Any]:
-        """Return Gaussian white noise as a stand-in for real strain."""
+        """Return Gaussian white noise (internal/testing only)."""
+        record = GWOSCLoader._mock_strain_fallback(
+            detector, gps_start, gps_end, sample_rate, reason="internal mock"
+        )
+        record["source"] = "MOCK"
+        return record
+
+    @staticmethod
+    def _mock_strain_fallback(
+        detector: str,
+        gps_start: float,
+        gps_end: float,
+        sample_rate: float,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Mock strain tagged as MOCK_FALLBACK — must not be used silently."""
         n = int((gps_end - gps_start) * sample_rate)
         rng = np.random.default_rng(int(gps_start) % (2**32))
         strain = rng.standard_normal(n) * 1e-21
@@ -228,7 +275,9 @@ class GWOSCLoader:
             "gps_start": gps_start,
             "gps_end": gps_end,
             "detector": detector,
-            "checksum": "mock",
+            "checksum": "mock_fallback",
             "dq_flags": {},
-            "source": "MOCK",
+            "source": "MOCK_FALLBACK",
+            "requested_source": "GWOSC",
+            "fallback_reason": reason,
         }

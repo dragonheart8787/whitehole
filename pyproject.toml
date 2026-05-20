@@ -4,44 +4,53 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whitesearch"
-version = "0.1.0"
+version = "0.1.1"
 description = "White hole candidate signal search and evidence ranking engine"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "WhiteSearch Team" }]
 
+# Minimal runtime: numpy stack + CLI only
 dependencies = [
     "numpy>=1.26",
     "scipy>=1.12",
     "matplotlib>=3.8",
-    "astropy>=6.0",
-    "astroquery>=0.4.7",
     "pydantic>=2.6",
-    "gwpy>=3.0",
-    "h5py>=3.10",
-    "pandas>=2.2",
     "PyYAML>=6.0",
     "click>=8.1",
     "tqdm>=4.66",
-    "mlflow>=2.11",
-    "dvc>=3.48",
-    "scikit-learn>=1.4",
-    "corner>=2.2",
 ]
 
 [project.optional-dependencies]
+astro = [
+    "astropy>=6.0",
+    "astroquery>=0.4.7",
+    "pandas>=2.2",
+    "h5py>=3.10",
+]
+gw = [
+    "gwpy>=3.0",
+]
 inference = [
     "bilby>=2.2",
     "dynesty>=2.1",
 ]
-gw = [
+gw-full = [
+    "whitesearch[gw,inference]",
     "pycbc>=2.3",
-    "lalsuite>=7.21",
 ]
 imaging = [
     "einsteinpy>=0.4",
     "ehtim>=1.2",
+]
+tracking = [
+    "mlflow>=2.11",
+    "dvc>=3.48",
+]
+viz = [
+    "corner>=2.2",
+    "scikit-learn>=1.4",
 ]
 hpc = [
     "snakemake>=8.0",
@@ -55,8 +64,12 @@ dev = [
     "ipykernel>=6.29",
     "nbformat>=5.9",
 ]
+# Typical local science workflow
+science = [
+    "whitesearch[astro,gw,inference,viz,dev]",
+]
 all = [
-    "whitesearch[inference,gw,imaging,hpc,dev]",
+    "whitesearch[science,gw-full,imaging,tracking,hpc]",
 ]
 
 [project.scripts]

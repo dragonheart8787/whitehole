@@ -122,6 +122,7 @@ class BilbyRunner:
         outdir: str | Path = "artifacts/bilby",
         resume: bool = True,
         seed: int = 42,
+        force_toy: bool = False,
         **sampler_kwargs: Any,
     ) -> None:
         self.sampler = sampler
@@ -129,6 +130,7 @@ class BilbyRunner:
         self.outdir = Path(outdir)
         self.resume = resume
         self.seed = seed
+        self.force_toy = force_toy
         self.sampler_kwargs = sampler_kwargs
 
     def run(
@@ -149,9 +151,12 @@ class BilbyRunner:
         model : BaseModel (supplies bilby priors)
         label : str — unique label for this run
         """
-        if not BILBY_AVAILABLE:
-            logger.warning("Using toy sampler (bilby not installed).")
-            return self._toy_sampler(likelihood, data, context, model)
+        if not BILBY_AVAILABLE or self.force_toy or self.sampler == "toy":
+            if BILBY_AVAILABLE and (self.force_toy or self.sampler == "toy"):
+                logger.warning("Using toy sampler (force_toy=True).")
+            else:
+                logger.warning("Using toy sampler (bilby not installed).")
+            return self._toy_sampler(likelihood, data, context, model, label=label)
 
         t0 = time.time()
         self.outdir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +203,7 @@ class BilbyRunner:
             log_likelihood_samples=ll_samples,
             metadata={
                 "sampler": self.sampler,
+                "is_approximate_evidence": False,
                 "nlive": self.nlive,
                 "label": label,
                 "elapsed_s": elapsed,
@@ -278,6 +284,7 @@ class BilbyRunner:
         data: Any,
         context: dict[str, Any],
         model: BaseModel,
+        label: str = "whitesearch",
         n_samples: int = 2000,
     ) -> InferenceResult:
         """Importance-sampling approximation when bilby is unavailable."""
@@ -313,5 +320,11 @@ class BilbyRunner:
             log_evidence_err=ln_Z_err,
             posterior=posterior,
             log_likelihood_samples=log_weights_arr[idx],
-            metadata={"sampler": "toy_importance_sampling", "n_prior_samples": n_samples},
+            metadata={
+                "sampler": "toy_importance_sampling",
+                "is_approximate_evidence": True,
+                "n_prior_samples": n_samples,
+                "label": label,
+                "seed": self.seed,
+            },
         )

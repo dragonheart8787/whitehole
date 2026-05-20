@@ -23,31 +23,45 @@ def tmp_cache(tmp_path):
 
 class TestGWOSCLoader:
     def test_load_known_event_returns_dict(self, tmp_cache):
-        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc")
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=True)
         result = loader.load_event("GW150914")
         assert isinstance(result, dict)
         assert len(result) > 0
 
     def test_strain_is_array(self, tmp_cache):
-        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc")
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=True)
         result = loader.load_event("GW150914", detectors=["H1"])
         assert "H1" in result
         assert isinstance(result["H1"]["strain"], np.ndarray)
         assert len(result["H1"]["strain"]) > 0
 
     def test_unknown_event_raises(self, tmp_cache):
-        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc")
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=True)
         with pytest.raises(ValueError):
             loader.load_event("GW_DOES_NOT_EXIST")
 
     def test_segment_load_returns_dict(self, tmp_cache):
-        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc")
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=True)
         result = loader.load_segment("H1", gps_start=1126259462.0, gps_end=1126259462.0 + 4.0)
         assert "strain" in result
         assert "times" in result
 
     def test_checksum_is_string(self, tmp_cache):
-        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc")
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=True)
+        result = loader.load_event("GW150914", detectors=["H1"])
+        assert isinstance(result["H1"]["checksum"], str)
+
+    def test_fail_closed_without_fallback(self, tmp_cache):
+        from whitesearch.dataio.provenance import DataLoadError
+        loader = GWOSCLoader(cache_dir=tmp_cache / "gwosc", allow_mock_fallback=False)
+        try:
+            from whitesearch.dataio import gwosc as gwosc_mod
+            if gwosc_mod.GWPY_AVAILABLE:
+                pytest.skip("GWPy available; cannot test fail-closed path reliably")
+        except ImportError:
+            pass
+        with pytest.raises(DataLoadError):
+            loader.load_segment("H1", 1126259462.0, 1126259462.0 + 4.0)
         result = loader.load_event("GW150914", detectors=["H1"])
         assert isinstance(result["H1"]["checksum"], str)
 

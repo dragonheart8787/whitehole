@@ -4,135 +4,140 @@
 
 **WhiteSearch 不是「證明白洞存在的程式」，而是「以多模型前向模擬、多資料通道、貝氏模型比較與嚴格驗證，搜尋並量化白洞候選訊號的證據引擎」。**
 
-白洞在廣義相對論與量子重力文獻中有多種理論化身，但截至目前並沒有被觀測確認。本專案採用統計上可審計的方法，以 Bayes factor 作為核心 KPI，對白洞候選事件進行可重現的排名。
+核心工作流是 **`compare` / `rank`（Bayes factor 模型比較）**，不是單看一個模型的 ln Z。
 
 ## 支援的白洞模型
 
-| 模型 | 主要可觀測通道 | 核心參數 |
-|------|--------------|---------|
-| GR 永恆白洞 | 影像/陰影 | M, a*, Q, D_L, i |
-| Black-to-white bounce | 重力波 | M, a*, τ_bounce, ℓ_q, Δ, p |
-| PBH 量子穿隧白洞 | 電磁爆發 (FRB/gamma) | M, f_PBH, k, η_r, η_γ |
-| 零假設 + 替代模型 | 三通道 | magnetar, GRB, BH 吸積 |
+| 模型 | 主要可觀測通道 | CLI `--model` |
+|------|--------------|---------------|
+| GR 永恆白洞 | 影像/陰影 | `gr_eternal` |
+| Black-to-white bounce | 重力波 | `bounce` |
+| PBH 量子穿隧白洞 | 電磁爆發 (FRB/gamma) | `pbh_tunneling` |
+| 標準 BH ringdown | GW（對照） | `bh_ringdown` |
+| Magnetar flare | 電磁（對照） | `magnetar` |
 
-## 三通道資料接入
+## 資料接入（誠實說明）
 
-| 資料源 | 通道 | 接入工具 |
-|--------|------|---------|
-| GWOSC (O1–O4a) | 重力波 | GWPy |
-| CHIME/FRB Catalog | 電磁爆發 | cfod / astropy |
-| HEASARC | X-ray/gamma | astroquery |
-| Chandra Archive | X-ray | CIAO |
-| XMM-Newton Archive | X-ray | XMM-SAS |
-| EHT 2017 L1 | 影像/VLBI | ehtim (Phase 2) |
+| 資料源 | 狀態 | 說明 |
+|--------|------|------|
+| **mock** | 完整支援 | 明確標記 `MOCK_EXPLICIT` |
+| **GWOSC** | 精選事件白名單 | 目前驗證：`GW150914`, `GW151226`, `GW170814`, `GW200105`（非完整 O1–O4a 全庫） |
+| **CHIME/FRB** | catalog 讀取 | 本地/下載 catalog |
+| HEASARC / EHT | 開發中 | 預設 **fail-closed**；需 `--allow-mock-fallback` 才會替換 mock |
 
-## 核心統計框架
+**預設行為：真資料載入失敗會直接報錯退出，不會悄悄改用 mock。**
 
-```
-Z_m = ∫ p(d|θ,m) p(θ|m) dθ         (模型證據)
-BF_10 = Z_1 / Z_0                    (Bayes factor)
-```
+## 安裝（分層依賴）
 
-使用 Bilby + dynesty nested sampling 同時估計 posterior 與 evidence。
-
-### 驗收門檻
-
-| 指標 | 內部升級 | 可投稿 |
-|------|---------|-------|
-| ln BF (vs 零假設) | > 3 | > 5 |
-| ln BF (vs 最佳替代) | > 1 | > 3 |
-| 假陽性率 | < 5% | < 1e-3 |
-| 靈敏度 (50% 回收率) | 目標區 | — |
-| 靈敏度 (90% 回收率) | — | 目標區 |
-| SBC 覆蓋率 | 80–100% | 85–95% |
-| 可重現性 | < 0.5 nat | < 0.2 nat |
-
-## 安裝
-
-### 基礎安裝（純 numpy/scipy/astropy）
+### 最小安裝（核心 + CLI）
 
 ```bash
-pip install -e ".[dev]"
+pip install -e .
 ```
 
-### 含 Bayesian 推論（建議）
+僅含：numpy, scipy, matplotlib, click, pyyaml, tqdm
+
+### 科學工作流（建議）
 
 ```bash
-pip install -e ".[inference,dev]"
+pip install -e ".[science]"
 ```
 
-### 含 GW 工具（Linux 限定）
+含：astropy, astroquery, pandas, gwpy, bilby, dynesty, corner, scikit-learn, pytest
 
-```bash
-pip install -e ".[inference,gw,dev]"
-```
+### 選用 extras
 
-### 完整安裝（建議使用 Docker）
+| extra | 內容 |
+|-------|------|
+| `astro` | astropy, astroquery, pandas, h5py |
+| `gw` | gwpy |
+| `inference` | bilby, dynesty |
+| `gw-full` | gw + inference + pycbc |
+| `viz` | corner, scikit-learn |
+| `tracking` | mlflow, dvc |
+| `all` | 全部 |
+
+### Docker（Linux / 完整 GW）
 
 ```bash
 docker build -t whitesearch:latest containers/
-docker run --rm -it whitesearch:latest bash
 ```
-
-> **注意**：PyCBC、LALSuite、ehtim 等套件在 Windows 上需透過 Docker 或 WSL2 使用。
-
-## GitHub 同步
-
-遠端儲存庫：[https://github.com/dragonheart8787/whitehole](https://github.com/dragonheart8787/whitehole)
-
-```powershell
-# 手動同步（add + commit + push）
-.\scripts\sync-github.ps1 -Message "描述此次更新"
-
-# 安裝「每次 commit 後自動 push」（只需一次）
-.\scripts\install-git-hooks.ps1
-```
-
-一般流程：`git add` → `git commit` →（若已安裝 hook 會自動 push）或執行 `sync-github.ps1`。
 
 ## 快速開始
 
 ```bash
-# 執行 mock injection/recovery 測試
-whitesearch inject --model bounce --channel gw --n-injections 100
+# 安裝後直接使用（入口：whitesearch.cli）
+whitesearch --help
 
-# 對 GWOSC 公開資料計算 Bayes factor
-whitesearch fit --model bounce --data gwosc --event GW150914
+# 核心：模型比較（Bayes factor）
+whitesearch compare --model bounce --null null --alt bh_ringdown --channel gw --data mock
 
-# 生成靈敏度曲線
-whitesearch sensitivity --model pbh_tunneling --channel radio
+# 單模型 fit（會印出資料來源、sampler、是否近似證據）
+whitesearch fit --model bounce --channel gw --data mock
 
-# 一鍵重跑完整 MVP 管線
-snakemake --snakefile workflows/Snakefile --cores 4
+# mock 測試時，注入模型預設等於 fit 模型
+whitesearch fit --model bh_ringdown --channel gw --data mock
+# inject_model=bh_ringdown（一致）
+
+# 模型歧視測試：顯式指定不同注入模型
+whitesearch fit --model bh_ringdown --channel gw --data mock --inject-model bounce
+
+# 真實 GWOSC（需 gwpy + 網路；失敗則報錯）
+whitesearch compare --model bounce --data gwosc --event GW150914 --channel gw
+
+# 僅在明知後果時允許 mock 替換
+whitesearch fit --model bounce --data gwosc --event GW150914 --allow-mock-fallback
+
+# 多模型排名
+whitesearch rank --models bounce,bh_ringdown,magnetar,null --channel gw --data mock
+
+# 注入/回收驗證
+whitesearch inject --model bounce --channel gw --n-injections 50
+
+# 產生報告（含 provenance / fallback 警告）
+whitesearch report --run-dir artifacts/compare --output artifacts/report.md
 ```
+
+亦可使用：
+
+```bash
+python -m whitesearch --help
+```
+
+## CLI 輸出說明
+
+`fit` / `compare` 會印出：
+
+- `Fit model` / `Inject model`（mock 時）
+- `Actual source used`：`GWOSC` / `MOCK_EXPLICIT` / `MOCK_FALLBACK`
+- `Sampler`：`dynesty` 或 `toy_importance_sampling`
+- `Approximate evidence: YES/NO`
+
+若未安裝 bilby/dynesty，會顯示 **WARNING: 證據為近似值，不可當發表結論**。
 
 ## 目錄結構
 
 ```
-白洞程式/
-├── src/whitesearch/
-│   ├── models/          # 白洞模型 + 替代模型定義
-│   ├── simulators/      # 三通道前向模擬器（影像/GW/EM）
-│   ├── dataio/          # 六大資料源接口
-│   ├── preprocess/      # 品質旗標、濾波、校準
-│   ├── likelihoods/     # 通道別 + 聯合 likelihood
-│   ├── inference/       # Bilby/dynesty/PyCBC wrappers
-│   ├── validation/      # SBC、PPC、注入/回收
-│   ├── surrogates/      # Surrogate emulator
-│   └── utils/           # 物理常數與數學工具
-├── configs/             # YAML priors、run config
-├── workflows/           # Snakemake + CLI 管線
-├── tests/               # pytest 單元 + 整合測試
-├── containers/          # Dockerfile + Apptainer .def
-├── notebooks/           # EDA 與報告圖表
-└── artifacts/           # 版本化輸出（DVC 管理）
+src/whitesearch/
+├── cli.py           # 正式 CLI 入口（whitesearch 指令）
+├── models/
+├── simulators/
+├── dataio/          # loader.py + provenance（fail-closed）
+├── likelihoods/
+├── inference/
+└── validation/
+configs/
+workflows/           # Snakemake；cli.py 為相容 shim
+tests/
 ```
 
-## 可重現性保證
+## GitHub
 
-- 所有結果以固定隨機種子 + 固定容器雜湊重跑
-- 資料版本以 DVC 追蹤；實驗以 MLflow 記錄
-- 同容器重跑證據差異應 < 0.2 nat（可投稿門檻）
+https://github.com/dragonheart8787/whitehole
+
+```powershell
+.\scripts\sync-github.ps1 -Message "更新說明"
+```
 
 ## 授權
 
