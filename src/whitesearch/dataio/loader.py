@@ -66,7 +66,7 @@ def load_observation_data(
             bundle = loader.load_event(event)
             det = list(bundle.keys())[0]
             record = bundle[det]
-            record = _attach_gw_psd(record)
+            record = _prepare_gw_observation(record)
             actual = record.get("source", "GWOSC")
             prov = DataProvenance(
                 requested_source="gwosc",
@@ -158,21 +158,40 @@ def load_observation_data(
     )
 
 
-def _attach_gw_psd(record: dict[str, Any]) -> dict[str, Any]:
-    """Estimate one-sided PSD on the strain FFT grid for GW likelihoods."""
-    from ..utils.math_utils import estimate_psd
+def _prepare_gw_observation(record: dict[str, Any]) -> dict[str, Any]:
+    """Bandpass, estimate PSD, and whiten strain for GW likelihoods."""
+    from ..preprocess.gw_preprocess import GWPreprocessor
 
     strain = np.asarray(record["strain"], dtype=np.float64)
     sr = float(record["sample_rate"])
-    n = len(strain)
-    dt = 1.0 / sr
-    freqs = np.fft.rfftfreq(n, d=dt)
-    freqs_w, psd_w = estimate_psd(strain, sr)
-    psd = np.interp(freqs, freqs_w, psd_w, left=float(psd_w[0]), right=float(psd_w[-1]))
-    psd = np.where(psd > 0, psd, 1.0e-30)
+    prep = GWPreprocessor(sample_rate=sr)
+    proc = prep.prepare_raw(strain, record.get("dq_flags"))
+
     out = dict(record)
+    out["strain_raw"] = strain
+    # Use bandpass strain (not pre-whitened) — templates are matched in PSD-weighted domain.
+    strain_bp = proc["strain_bandpass"]
+    psd = proc["psd"]
+
+    # Calibrate amplitude to typical mock-injection scale (~1e-20) for likelihood stability.
+    target_rms = 1e-20
+    rms = float(np.std(strain_bp))
+    if rms > 0:
+        scale = target_rms / rms
+        strain_bp = strain_bp * scale
+        psd = psd * (scale ** 2)
+
+    out["strain"] = strain_bp
+    out["strain_whitened"] = proc["strain_whitened"]
     out["psd"] = psd
-    out.setdefault("t_merger", 0.5 * n / sr)
+    out["preprocess_quality"] = proc["quality"]
+    out["strain_calibration_scale"] = scale if rms > 0 else 1.0
+
+    n = len(out["strain"])
+    if "event_gps" in record and "gps_start" in record:
+        out["t_merger"] = float(record["event_gps"]) - float(record["gps_start"])
+    else:
+        out["t_merger"] = 0.5 * n / sr
     return out
 
 

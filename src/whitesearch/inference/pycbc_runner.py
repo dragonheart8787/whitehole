@@ -84,8 +84,8 @@ class GWSearchRunner:
         times = np.arange(n) * dt
 
         if psd is None:
-            _, psd_welch = estimate_psd(strain, sample_rate)
-            psd = np.interp(freqs, np.fft.rfftfreq(n, d=dt), psd_welch, left=psd_welch[0], right=psd_welch[-1])
+            freqs_w, psd_welch = estimate_psd(strain, sample_rate)
+            psd = np.interp(freqs, freqs_w, psd_welch, left=float(psd_welch[0]), right=float(psd_welch[-1]))
 
         psd = np.where(psd > 0, psd, 1e-30)
         psd[freqs < low_freq] = 1e-30

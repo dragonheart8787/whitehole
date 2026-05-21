@@ -111,7 +111,8 @@ def estimate_psd(
     psd : ndarray [Hz^{-1}]
     """
     nperseg = int(fft_length * sample_rate)
-    noverlap = int(overlap * nperseg)
+    nperseg = max(64, min(nperseg, len(strain) // 2))
+    noverlap = min(int(overlap * nperseg), nperseg - 1)
     freqs, psd = sp_signal.welch(
         strain,
         fs=sample_rate,

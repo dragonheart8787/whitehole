@@ -64,6 +64,26 @@ class TestInferenceResult:
         assert abs(med["M"] - 60.0) < 2.0
 
 
+class TestNullAnalyticEvidence:
+    def test_null_model_zero_param_bilby_path(
+        self, gw_sim_data, gw_context, tmp_path
+    ):
+        from whitesearch.models import NullHypothesis
+        from whitesearch.likelihoods import GWLikelihood
+
+        from whitesearch.inference.bilby_runner import BILBY_AVAILABLE
+
+        if not BILBY_AVAILABLE:
+            pytest.skip("bilby not installed")
+        runner = BilbyRunner(force_toy=False, nlive=10, outdir=str(tmp_path), seed=0)
+        result = runner.run(
+            GWLikelihood("null"), gw_sim_data, gw_context, NullHypothesis(), label="null"
+        )
+        assert result.metadata["sampler"] == "analytic_zero_parameter"
+        assert np.isfinite(result.log_evidence)
+        assert len(result.posterior) == 0
+
+
 class TestBilbyRunner:
     def test_toy_sampler_returns_result(
         self, bounce_params, gw_context, gw_sim_data, tmp_path

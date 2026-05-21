@@ -155,6 +155,11 @@ class BilbyRunner:
         model : BaseModel (supplies bilby priors)
         label : str — unique label for this run
         """
+        if not model.parameter_names:
+            return self._analytic_zero_parameter_evidence(
+                likelihood, data, context, model, label=label
+            )
+
         if not BILBY_AVAILABLE or self.force_toy or self.sampler == "toy":
             if BILBY_AVAILABLE and (self.force_toy or self.sampler == "toy"):
                 logger.warning("Using toy sampler (force_toy=True).")
@@ -198,7 +203,10 @@ class BilbyRunner:
         )
 
         posterior = result.posterior.copy()
-        ll_samples = posterior.pop("log_likelihood", np.zeros(len(posterior))).values
+        if "log_likelihood" in posterior.columns:
+            ll_samples = posterior.pop("log_likelihood").values
+        else:
+            ll_samples = np.zeros(len(posterior))
 
         return InferenceResult(
             log_evidence=float(result.log_evidence),
@@ -281,6 +289,35 @@ class BilbyRunner:
                 return float(val) if np.isfinite(val) else -1e30
 
         return _Wrapper()
+
+    def _analytic_zero_parameter_evidence(
+        self,
+        likelihood: BaseLikelihood,
+        data: Any,
+        context: dict[str, Any],
+        model: BaseModel,
+        label: str = "whitesearch",
+    ) -> InferenceResult:
+        """Exact log-evidence for models with no free parameters (e.g. null)."""
+        theta: dict[str, float] = {}
+        ll = float(likelihood.loglike(theta, data, context))
+        logger.info(
+            "Analytic evidence for %s (0 parameters): ln Z = %.3f",
+            model.name,
+            ll,
+        )
+        return InferenceResult(
+            log_evidence=ll,
+            log_evidence_err=0.0,
+            posterior=pd.DataFrame(),
+            log_likelihood_samples=np.array([ll]),
+            metadata={
+                "sampler": "analytic_zero_parameter",
+                "is_approximate_evidence": False,
+                "label": label,
+                "seed": self.seed,
+            },
+        )
 
     def _toy_sampler(
         self,

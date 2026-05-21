@@ -98,9 +98,13 @@ class GWOSCLoader:
 
         result = {}
         for det in detectors:
-            result[det] = self._load_strain(
+            rec = self._load_strain(
                 det, gps_start, gps_end, sample_rate, event_name
             )
+            rec["event_gps"] = gps_center
+            rec["event_name"] = event_name
+            rec["gps_start"] = gps_start
+            result[det] = rec
         return result
 
     def load_segment(
