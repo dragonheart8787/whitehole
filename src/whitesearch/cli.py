@@ -195,16 +195,21 @@ def rank(models, reference, channel, data, event, inject_model, nlive, outdir, s
         click.echo(f"ERROR: {exc}", err=True)
         sys.exit(1)
 
-    runner = BilbyRunner(nlive=nlive, outdir=outdir, seed=seed)
     results = {}
     for m in model_list:
         click.echo(f"Fitting {m} …")
+        try:
+            _get_likelihood(channel, m)
+        except ValueError as exc:
+            click.echo(f"ERROR: {exc}", err=True)
+            sys.exit(1)
         results[m] = _run_single_fit(
             m, channel, obs_data, context, prov, inject_model,
             nlive=nlive, outdir=outdir, seed=seed + hash(m) % 1000,
             resume=False, event=event, data=data, label_suffix=m,
         )
 
+    runner = BilbyRunner(nlive=nlive, outdir=outdir, seed=seed)
     table = runner.compare_models(results, reference=reference)
     click.echo("\n" + table.to_string(index=False))
     click.echo(f"\nReference model: {reference}")
@@ -503,6 +508,20 @@ def _get_likelihood(channel: str, model: str):
     from whitesearch.likelihoods import (
         GWLikelihood, RadioBurstLikelihood, XRayBurstLikelihood, VisibilityLikelihood,
     )
+    from whitesearch.models import get_model
+
+    model_channel = get_model(model).channel
+    compatible = {
+        "gw": {"gw", "generic"},
+        "radio": {"radio", "generic"},
+        "xray": {"xray", "radio", "generic"},
+        "image": {"image", "generic"},
+    }
+    if model_channel not in compatible.get(channel, set()):
+        raise ValueError(
+            f"Model '{model}' (native channel={model_channel}) "
+            f"cannot be fit on data channel '{channel}'"
+        )
     return {
         "gw": GWLikelihood(model),
         "radio": RadioBurstLikelihood(model),

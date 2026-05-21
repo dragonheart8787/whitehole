@@ -10,6 +10,7 @@ When bilby is not installed, a minimal toy nested sampler is provided
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,7 +131,10 @@ class BilbyRunner:
         self.outdir = Path(outdir)
         self.resume = resume
         self.seed = seed
-        self.force_toy = force_toy
+        env_force = os.environ.get("WHITESEARCH_FORCE_TOY", "").strip().lower() in (
+            "1", "true", "yes",
+        )
+        self.force_toy = force_toy or env_force
         self.sampler_kwargs = sampler_kwargs
 
     def run(
@@ -313,7 +317,10 @@ class BilbyRunner:
         # Weighted posterior samples
         idx = rng.choice(n_samples, size=min(1000, n_samples), replace=True, p=weights)
         posterior_rows = [samples[i] for i in idx]
-        posterior = pd.DataFrame(posterior_rows, columns=param_names)
+        if param_names:
+            posterior = pd.DataFrame(posterior_rows, columns=param_names)
+        else:
+            posterior = pd.DataFrame(index=range(len(posterior_rows)))
 
         return InferenceResult(
             log_evidence=ln_Z,

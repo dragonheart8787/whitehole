@@ -33,6 +33,8 @@ class RadioBurstLikelihood(BaseLikelihood):
 
     @property
     def parameter_names(self) -> list[str]:
+        if self.model_name == "null":
+            return []
         if self.model_name == "pbh_tunneling":
             return [
                 "log10_M_g", "log10_f_pbh", "log10_k_tunnel",
@@ -59,6 +61,9 @@ class RadioBurstLikelihood(BaseLikelihood):
         data : SimData with .data shape (n_freq, n_time) or raw dict
         context : dict with 'freqs_mhz', 'times_s', 'sigma_noise_jy'
         """
+        if self.model_name == "null":
+            return self._null_radio_loglike(data, context)
+
         from ..simulators.em_burst import EMBurstSimulator
 
         # Observed data
@@ -83,6 +88,19 @@ class RadioBurstLikelihood(BaseLikelihood):
 
         # Gaussian likelihood (vectorised)
         ll = -0.5 * np.sum(((obs - signal) / sigma) ** 2)
+        ll -= 0.5 * obs.size * np.log(2.0 * np.pi * sigma**2)
+        return float(ll)
+
+    def _null_radio_loglike(self, data: Any, context: dict[str, Any]) -> float:
+        """Pure noise dynamic spectrum (zero signal)."""
+        if hasattr(data, "data"):
+            obs = np.asarray(data.data, dtype=np.float64)
+            meta = data.metadata
+        else:
+            obs = np.asarray(data["data"], dtype=np.float64)
+            meta = data
+        sigma = float(meta.get("sigma_noise_jy", context.get("sigma_noise_jy", 1.0)))
+        ll = -0.5 * np.sum((obs / sigma) ** 2)
         ll -= 0.5 * obs.size * np.log(2.0 * np.pi * sigma**2)
         return float(ll)
 

@@ -47,6 +47,8 @@ class GWLikelihood(BaseLikelihood):
 
     @property
     def parameter_names(self) -> list[str]:
+        if self.model_name == "null":
+            return []
         if self.model_name == "bounce":
             return [
                 "M", "a_star", "eps_f", "eps_Q",
@@ -77,6 +79,9 @@ class GWLikelihood(BaseLikelihood):
         -------
         float — log-likelihood
         """
+        if self.model_name == "null":
+            return self._null_loglike(data)
+
         try:
             strain = np.asarray(
                 data.data if hasattr(data, "data") else data["strain"],
@@ -108,6 +113,22 @@ class GWLikelihood(BaseLikelihood):
             ll = self._mf_snr_loglike(strain_f, h_template_f, psd, df)
 
         return ll
+
+    def _null_loglike(self, data: Any) -> float:
+        """Pure Gaussian noise: log L = −½ ⟨d|d⟩ (no signal parameters)."""
+        strain = np.asarray(
+            data.data if hasattr(data, "data") else data["strain"],
+            dtype=np.float64,
+        )
+        meta = data.metadata if hasattr(data, "metadata") else data
+        psd = np.asarray(meta["psd"], dtype=np.float64)
+        sample_rate = float(meta.get("sample_rate", 4096.0))
+        n = len(strain)
+        dt = 1.0 / sample_rate
+        df = 1.0 / (n * dt)
+        strain_f = np.fft.rfft(strain) * dt
+        inner = noise_weighted_inner_product(strain_f, strain_f, psd, df)
+        return float(-0.5 * inner.real)
 
     # ── Template builder ──────────────────────────────────────────────────────
 
