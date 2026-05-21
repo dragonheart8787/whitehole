@@ -146,15 +146,19 @@ class GWOSCLoader:
 
         try:
             logger.info("Downloading %s %s–%s from GWOSC …", detector, gps_start, gps_end)
+            # Do not pass sample_rate=float — newer gwpy expects None or a rate tuple.
             ts = TimeSeries.fetch_open_data(
                 detector,
                 gps_start,
                 gps_end,
-                sample_rate=sample_rate,
                 verbose=False,
             )
+            target_sr = float(sample_rate)
+            if abs(float(ts.sample_rate.value) - target_sr) > 1.0:
+                ts = ts.resample(target_sr)
             strain = ts.value.astype(np.float64)
             times = ts.times.value.astype(np.float64)
+            sample_rate = float(ts.sample_rate.value)
             dq_flags = self._get_dq_flags(detector, gps_start, gps_end)
             checksum = self._checksum(strain)
 

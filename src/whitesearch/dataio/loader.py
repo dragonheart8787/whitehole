@@ -66,6 +66,7 @@ def load_observation_data(
             bundle = loader.load_event(event)
             det = list(bundle.keys())[0]
             record = bundle[det]
+            record = _attach_gw_psd(record)
             actual = record.get("source", "GWOSC")
             prov = DataProvenance(
                 requested_source="gwosc",
@@ -155,6 +156,24 @@ def load_observation_data(
         requested_source=source,
         reason="unknown source",
     )
+
+
+def _attach_gw_psd(record: dict[str, Any]) -> dict[str, Any]:
+    """Estimate one-sided PSD on the strain FFT grid for GW likelihoods."""
+    from ..utils.math_utils import estimate_psd
+
+    strain = np.asarray(record["strain"], dtype=np.float64)
+    sr = float(record["sample_rate"])
+    n = len(strain)
+    dt = 1.0 / sr
+    freqs = np.fft.rfftfreq(n, d=dt)
+    freqs_w, psd_w = estimate_psd(strain, sr)
+    psd = np.interp(freqs, freqs_w, psd_w, left=float(psd_w[0]), right=float(psd_w[-1]))
+    psd = np.where(psd > 0, psd, 1.0e-30)
+    out = dict(record)
+    out["psd"] = psd
+    out.setdefault("t_merger", 0.5 * n / sr)
+    return out
 
 
 def _load_mock(channel: str, inject_model: str, context: dict, seed: int) -> Any:
