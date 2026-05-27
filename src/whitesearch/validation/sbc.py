@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -127,6 +128,52 @@ class SBCResult:
             fig.savefig(save_path, dpi=150, bbox_inches="tight")
             logger.info("SBC plot saved to %s", save_path)
         return fig
+
+    def plot_parameter(self, param: str, save_path: str | Path) -> Any:
+        """Plot rank histogram for a single parameter."""
+        import matplotlib.pyplot as plt
+
+        rank_list = self.ranks.get(param, [])
+        fig, ax = plt.subplots(figsize=(5, 4))
+        if len(rank_list) == 0:
+            ax.set_title(f"{param} (no data)")
+        else:
+            ax.hist(
+                rank_list,
+                bins=min(20, self.n_posterior_samples),
+                range=(0, self.n_posterior_samples),
+                density=True,
+                color="steelblue",
+                alpha=0.7,
+            )
+            ax.axhline(
+                1.0 / self.n_posterior_samples,
+                color="red",
+                ls="--",
+                label="uniform",
+            )
+            pval = self.uniformity_pvalues.get(param, np.nan)
+            ax.set_title(f"{param}\nKS p={pval:.3f}")
+            ax.set_xlabel("Rank")
+            ax.set_ylabel("Density")
+            ax.legend(fontsize=8)
+        fig.tight_layout()
+        path = Path(save_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return fig
+
+    def plot_all(self, outdir: str | Path) -> list[Path]:
+        """Write ``rank_hist_<param>.png`` for each parameter."""
+        outdir = Path(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for param in self.ranks:
+            p = outdir / f"rank_hist_{param}.png"
+            self.plot_parameter(param, p)
+            paths.append(p)
+        return paths
 
 
 class SBCRunner:

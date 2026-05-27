@@ -102,6 +102,41 @@ class PPCResult:
             logger.info("PPC plot saved to %s", save_path)
         return fig
 
+    def plot_statistic(self, stat: str, save_path: str | Path) -> Any:
+        """Plot posterior predictive distribution for one summary statistic."""
+        from pathlib import Path as PathLib
+
+        pred = self.predicted_stats.get(stat, [])
+        obs = self.observed_stats.get(stat, np.nan)
+        fig, ax = plt.subplots(figsize=(5, 4))
+        if len(pred) > 0:
+            ax.hist(pred, bins=30, density=True, color="steelblue", alpha=0.7, label="Predicted")
+        ax.axvline(obs, color="red", ls="--", lw=2, label="Observed")
+        pval = self.pvalues.get(stat, np.nan)
+        ax.set_title(f"{stat}\np-value={pval:.3f}")
+        ax.set_xlabel(stat)
+        ax.set_ylabel("Density")
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        path = PathLib(save_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        return fig
+
+    def plot_all(self, outdir: str | Path) -> list[Any]:
+        """Write ``ppc_<stat>.png`` for each summary statistic."""
+        from pathlib import Path as PathLib
+
+        outdir = PathLib(outdir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for stat in self.observed_stats:
+            p = outdir / f"ppc_{stat}.png"
+            self.plot_statistic(stat, p)
+            paths.append(p)
+        return paths
+
 
 class PosteriorPredictiveCheck:
     """Run posterior predictive checks for a given inference result.

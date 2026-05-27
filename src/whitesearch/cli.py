@@ -603,23 +603,39 @@ def _get_likelihood(channel: str, model: str, *, likelihood_mode: str = "full"):
 @click.option("--data", default="mock", type=click.Choice(DATA_CHOICES))
 @click.option("--event", default=None)
 @click.option("--outdir", default=None, help="Default: artifacts/calibration/<timestamp>")
-@click.option("--n-injections", default=20, show_default=True)
-@click.option("--n-sbc", default=12, show_default=True)
-@click.option("--nlive", default=50, show_default=True)
+@click.option("--profile", type=click.Choice(["quick", "standard"]), default="quick", show_default=True)
+@click.option("--n-injections", default=None, type=int, help="Override profile default")
+@click.option("--n-sbc", default=None, type=int, help="Override profile default")
+@click.option("--n-ppc", default=None, type=int, help="Override profile default")
+@click.option("--nlive", default=None, type=int, help="Override profile default")
 @click.option("--seed", default=42, show_default=True)
 @click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf")
 @click.option("--reference-amplitude/--no-reference-amplitude", default=False)
-@click.option("--force-toy/--no-force-toy", default=True, show_default=True)
-def calibrate(model, channel, data, event, outdir, n_injections, n_sbc, nlive, seed,
-              likelihood_mode, reference_amplitude, force_toy):
+@click.option("--force-toy/--no-force-toy", default=None, help="Default: True for quick, False for standard")
+def calibrate(
+    model, channel, data, event, outdir, profile,
+    n_injections, n_sbc, n_ppc, nlive, seed,
+    likelihood_mode, reference_amplitude, force_toy,
+):
     """Generate calibration report (coverage, SBC, PPC, prior audit, mock vs real)."""
     from datetime import datetime, timezone
     from whitesearch.validation.calibration_report import generate_calibration_report
 
+    if profile == "quick":
+        defaults = {"n_injections": 8, "n_sbc": 6, "n_ppc": 25, "nlive": 30, "force_toy": True}
+    else:
+        defaults = {"n_injections": 20, "n_sbc": 12, "n_ppc": 50, "nlive": 50, "force_toy": False}
+    n_injections = n_injections if n_injections is not None else defaults["n_injections"]
+    n_sbc = n_sbc if n_sbc is not None else defaults["n_sbc"]
+    n_ppc = n_ppc if n_ppc is not None else defaults["n_ppc"]
+    nlive = nlive if nlive is not None else defaults["nlive"]
+    if force_toy is None:
+        force_toy = defaults["force_toy"]
+
     if outdir is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         outdir = f"artifacts/calibration/{ts}"
-    path = generate_calibration_report(
+    path, report = generate_calibration_report(
         outdir,
         model=model,
         channel=channel,
@@ -627,14 +643,18 @@ def calibrate(model, channel, data, event, outdir, n_injections, n_sbc, nlive, s
         event=event,
         n_injections=n_injections,
         n_sbc=n_sbc,
+        n_ppc=n_ppc,
         nlive=nlive,
         seed=seed,
         reference_amplitude=reference_amplitude,
         likelihood_mode=likelihood_mode,
         force_toy=force_toy,
+        profile=profile,
     )
-    click.echo(f"Calibration report written to {path}")
-    click.echo(f"  index: {path / 'index.md'}")
+    overall = report.get("overall", "FAIL")
+    click.echo(f"Calibration: {overall}")
+    click.echo(f"  report: {path.resolve()}")
+    click.echo(f"  open:   {path / 'index.md'}")
 
 
 if __name__ == "__main__":

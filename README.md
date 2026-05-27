@@ -102,9 +102,32 @@ whitesearch inject --model bounce --channel gw --n-injections 50
 # 產生報告（含 provenance / fallback 警告）
 whitesearch report --run-dir artifacts/compare --output artifacts/report.md
 
-# 固定 calibration 報告（coverage / SBC / PPC / prior audit / mock vs GWOSC）
-whitesearch calibrate --model bounce --channel gw --data mock --n-injections 20
+# Calibration（固定目錄報表，開 index.md 驗收）
+whitesearch calibrate --model bounce --channel gw --profile quick
+# 正式子集（需 bilby/dynesty，較慢）
+whitesearch calibrate --profile standard --no-force-toy
 ```
+
+### Calibration workflow
+
+執行後在 `artifacts/calibration/<run_id>/` 產生固定契約：
+
+| 檔案 | 內容 |
+|------|------|
+| `index.md` | 總覽 PASS/FAIL + 圖表連結 |
+| `report.json` | 機器可讀門檻結果 |
+| `config.json` | 執行參數 |
+| `coverage.csv`, `coverage.png` | 注入/回收覆蓋率 |
+| `sbc/sbc_summary.csv`, `sbc/rank_hist_<param>.png` | SBC rank 直方圖 |
+| `ppc/ppc_summary.csv`, `ppc/ppc_<stat>.png` | 後驗預測檢查 |
+| `prior_audit.csv` | Prior 敏感度（\|Δ ln Z\| < 1） |
+| `mock_vs_real/` | mock vs GW150914 的 strain RMS 與 ln Z 對照 |
+
+- **`--profile quick`**（預設）：toy sampler，數分鐘內可開 `index.md` 檢視。
+- **`--profile standard`**：dynesty，樣本較大，用於正式子集驗證。
+- **`--data mock`**：coverage 主資料；GWOSC 仍會在 `mock_vs_real/` 嘗試對照（失敗則標 `skipped`，不讓整份報告崩潰）。
+
+Docker 建置與容器內一條龍驗證**延後**，待 calibration quick 通過且 GWOSC 分階段 dynesty 穩定後再進行。
 
 ### GWOSC + dynesty 分階段驗收
 
