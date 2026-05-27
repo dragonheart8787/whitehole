@@ -83,7 +83,12 @@ whitesearch fit --model bh_ringdown --channel gw --data mock
 whitesearch fit --model bh_ringdown --channel gw --data mock --inject-model bounce
 
 # 真實 GWOSC（需 gwpy + 網路；失敗則報錯）
-whitesearch compare --model bounce --data gwosc --event GW150914 --channel gw
+# 建議先用 mf likelihood + 分階段驗收
+whitesearch fit --model bh_ringdown --data gwosc --event GW150914 --channel gw \
+  --likelihood-mode mf --nlive 30 --dynesty-bound live --dynesty-sample rwalk
+
+whitesearch compare --model bounce --null null --alt bh_ringdown --data gwosc \
+  --event GW150914 --channel gw --likelihood-mode mf --nlive 30
 
 # 僅在明知後果時允許 mock 替換
 whitesearch fit --model bounce --data gwosc --event GW150914 --allow-mock-fallback
@@ -96,7 +101,23 @@ whitesearch inject --model bounce --channel gw --n-injections 50
 
 # 產生報告（含 provenance / fallback 警告）
 whitesearch report --run-dir artifacts/compare --output artifacts/report.md
+
+# 固定 calibration 報告（coverage / SBC / PPC / prior audit / mock vs GWOSC）
+whitesearch calibrate --model bounce --channel gw --data mock --n-injections 20
 ```
+
+### GWOSC + dynesty 分階段驗收
+
+```powershell
+# 勿設 WHITESEARCH_FORCE_TOY；會寫入 diagnostics.json
+.\scripts\verify-gwosc-staged.ps1
+```
+
+階段：A `bh_ringdown` → B `bounce` → C `compare`。若 dynesty ellipsoid 失敗，會自動重試 `bound=multi`。
+
+可選：`--reference-amplitude` 將 GWOSC strain RMS 對齊 mock 量級（會寫入 metadata，非靜默）。
+
+每次 `fit` / `compare` 會產生 `{outdir}/diagnostics.json`（`frac_finite`、各模型 lnL 等）。
 
 亦可使用：
 
@@ -122,10 +143,10 @@ src/whitesearch/
 ├── cli.py           # 正式 CLI 入口（whitesearch 指令）
 ├── models/
 ├── simulators/
-├── dataio/          # loader.py + provenance（fail-closed）
-├── likelihoods/
+├── dataio/          # loader.py, gw_observation.py, provenance（fail-closed）
+├── likelihoods/     # gw_likelihood.py, gw_units.py
 ├── inference/
-└── validation/
+└── validation/      # gw_diagnostics.py, calibration_report.py
 configs/
 workflows/           # Snakemake；cli.py 為相容 shim
 tests/

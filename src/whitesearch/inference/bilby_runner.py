@@ -116,6 +116,13 @@ class BilbyRunner:
         Additional keyword arguments passed to bilby.run_sampler().
     """
 
+    DEFAULT_DYNESTY_KWARGS: dict[str, Any] = {
+        "bound": "live",
+        "sample": "rwalk",
+        "walks": 32,
+        "dlogz": 0.1,
+    }
+
     def __init__(
         self,
         sampler: str = "dynesty",
@@ -124,6 +131,8 @@ class BilbyRunner:
         resume: bool = True,
         seed: int = 42,
         force_toy: bool = False,
+        dynesty_bound: str | None = None,
+        dynesty_sample: str | None = None,
         **sampler_kwargs: Any,
     ) -> None:
         self.sampler = sampler
@@ -135,7 +144,13 @@ class BilbyRunner:
             "1", "true", "yes",
         )
         self.force_toy = force_toy or env_force
-        self.sampler_kwargs = sampler_kwargs
+        kw = dict(self.DEFAULT_DYNESTY_KWARGS)
+        if dynesty_bound is not None:
+            kw["bound"] = dynesty_bound
+        if dynesty_sample is not None:
+            kw["sample"] = dynesty_sample
+        kw.update(sampler_kwargs)
+        self.sampler_kwargs = kw
 
     def run(
         self,
@@ -181,17 +196,11 @@ class BilbyRunner:
             label,
         )
 
-        result = bilby.run_sampler(
-            likelihood=bilby_likelihood,
-            priors=priors,
-            sampler=self.sampler,
-            nlive=self.nlive,
-            label=label,
-            outdir=str(self.outdir),
-            resume=self.resume,
-            seed=self.seed,
-            save=True,
-            **self.sampler_kwargs,
+        result = self._run_dynesty(
+            bilby_likelihood, priors, label, bounds_to_try=[
+                self.sampler_kwargs.get("bound", "live"),
+                "multi",
+            ],
         )
 
         elapsed = time.time() - t0
@@ -220,8 +229,45 @@ class BilbyRunner:
                 "label": label,
                 "elapsed_s": elapsed,
                 "seed": self.seed,
+                "sampler_kwargs": dict(self.sampler_kwargs),
             },
         )
+
+    def _run_dynesty(
+        self,
+        bilby_likelihood: Any,
+        priors: Any,
+        label: str,
+        bounds_to_try: list[str],
+    ) -> Any:
+        last_exc: Exception | None = None
+        for bound in bounds_to_try:
+            kw = dict(self.sampler_kwargs)
+            kw["bound"] = bound
+            try:
+                logger.info("dynesty bound=%s sample=%s", bound, kw.get("sample"))
+                return bilby.run_sampler(
+                    likelihood=bilby_likelihood,
+                    priors=priors,
+                    sampler=self.sampler,
+                    nlive=self.nlive,
+                    label=label,
+                    outdir=str(self.outdir),
+                    resume=self.resume,
+                    seed=self.seed,
+                    save=True,
+                    **kw,
+                )
+            except RuntimeError as exc:
+                last_exc = exc
+                if "ellipsoid" in str(exc).lower() or "bound" in str(exc).lower():
+                    logger.warning("dynesty failed with bound=%s: %s", bound, exc)
+                    self.resume = False
+                    continue
+                raise
+        raise RuntimeError(
+            f"dynesty failed for all bound strategies {bounds_to_try}: {last_exc}"
+        ) from last_exc
 
     def compare_models(
         self,

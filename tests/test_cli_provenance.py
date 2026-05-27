@@ -16,6 +16,8 @@ def test_mock_explicit_provenance():
     assert prov.actual_source == "MOCK_EXPLICIT"
     assert not prov.fallback_used
     assert prov.inject_model == "bounce"
+    assert "psd" in data
+    assert "strain_rms_used" in data
 
 
 def test_inject_model_defaults_to_fit_model_via_loader():

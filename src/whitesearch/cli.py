@@ -65,8 +65,15 @@ def main():
 @click.option("--outdir", default="artifacts/bilby", show_default=True)
 @click.option("--seed", default=42, show_default=True)
 @click.option("--resume/--no-resume", default=True)
+@click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
+@click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
+@click.option("--dynesty-bound", default="live", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True)
 @_allow_mock_opt
-def fit(model, channel, data, event, inject_model, config, nlive, outdir, seed, resume, allow_mock_fallback):
+def fit(
+    model, channel, data, event, inject_model, config, nlive, outdir, seed, resume,
+    likelihood_mode, reference_amplitude, dynesty_bound, dynesty_sample, allow_mock_fallback,
+):
     """Fit one model and report ln Z with full data/sampler provenance."""
     inject_model = inject_model or model
     cfg = _load_run_config(config, channel)
@@ -77,6 +84,7 @@ def fit(model, channel, data, event, inject_model, config, nlive, outdir, seed, 
         obs_data, prov = load_observation_data(
             data, channel, event=event, inject_model=inject_model,
             seed=seed, context=context, allow_mock_fallback=allow_mock_fallback,
+            reference_amplitude=reference_amplitude,
         )
     except DataLoadError as exc:
         click.echo(f"ERROR: {exc}", err=True)
@@ -86,7 +94,11 @@ def fit(model, channel, data, event, inject_model, config, nlive, outdir, seed, 
         model, channel, obs_data, context, prov, inject_model,
         nlive=nlive, outdir=outdir, seed=seed, resume=resume,
         event=event, data=data,
+        likelihood_mode=likelihood_mode,
+        dynesty_bound=dynesty_bound,
+        dynesty_sample=dynesty_sample,
     )
+    _write_gw_diagnostics_file(outdir, obs_data, context, [model, "null", "bh_ringdown"], likelihood_mode)
     _print_warnings(prov, result)
     _print_fit_summary(model, inject_model, prov, result, channel, data, event)
 
@@ -107,9 +119,16 @@ def fit(model, channel, data, event, inject_model, config, nlive, outdir, seed, 
 @click.option("--nlive", default=300, show_default=True)
 @click.option("--outdir", default="artifacts/compare", show_default=True)
 @click.option("--seed", default=42, show_default=True)
+@click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
+@click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
+@click.option("--dynesty-bound", default="live", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True)
 @_allow_mock_opt
-def compare(model, null_model, alt_model, channel, data, event, inject_model, config,
-            nlive, outdir, seed, allow_mock_fallback):
+def compare(
+    model, null_model, alt_model, channel, data, event, inject_model, config,
+    nlive, outdir, seed, likelihood_mode, reference_amplitude,
+    dynesty_bound, dynesty_sample, allow_mock_fallback,
+):
     """Compare candidate vs null and alternative via Bayes factors (core workflow)."""
     inject_model = inject_model or model
     alt_model = alt_model or _default_alt_model(channel)
@@ -121,6 +140,7 @@ def compare(model, null_model, alt_model, channel, data, event, inject_model, co
         obs_data, prov = load_observation_data(
             data, channel, event=event, inject_model=inject_model,
             seed=seed, context=context, allow_mock_fallback=allow_mock_fallback,
+            reference_amplitude=reference_amplitude,
         )
     except DataLoadError as exc:
         click.echo(f"ERROR: {exc}", err=True)
@@ -131,11 +151,23 @@ def compare(model, null_model, alt_model, channel, data, event, inject_model, co
     results: dict[str, Any] = {}
     for m in [model, null_model, alt_model]:
         click.echo(f"\n--- Fitting model: {m} ---")
-        results[m] = _run_single_fit(
-            m, channel, obs_data, context, prov, inject_model,
-            nlive=nlive, outdir=outdir, seed=seed + hash(m) % 1000,
-            resume=False, event=event, data=data, label_suffix=m,
-        )
+        try:
+            results[m] = _run_single_fit(
+                m, channel, obs_data, context, prov, inject_model,
+                nlive=nlive, outdir=outdir, seed=seed + hash(m) % 1000,
+                resume=False, event=event, data=data, label_suffix=m,
+                likelihood_mode=likelihood_mode,
+                dynesty_bound=dynesty_bound,
+                dynesty_sample=dynesty_sample,
+            )
+        except RuntimeError as exc:
+            click.echo(f"ERROR fitting {m}: {exc}", err=True)
+            click.echo("See diagnostics.json for frac_finite.", err=True)
+            sys.exit(1)
+
+    _write_gw_diagnostics_file(
+        outdir, obs_data, context, [model, null_model, alt_model], likelihood_mode
+    )
 
     bf = compute_bayes_factor(
         results,
@@ -371,13 +403,24 @@ def _run_single_fit(
     event: str | None,
     data: str,
     label_suffix: str | None = None,
+    likelihood_mode: str = "mf",
+    dynesty_bound: str = "live",
+    dynesty_sample: str = "rwalk",
 ):
     from whitesearch.models import get_model
 
     model_obj = get_model(model)
-    ll = _get_likelihood(channel, model)
+    ll = _get_likelihood(channel, model, likelihood_mode=likelihood_mode)
     label = label_suffix or f"{model}_{channel}_{event or data}"
-    runner = BilbyRunner(sampler="dynesty", nlive=nlive, outdir=outdir, resume=resume, seed=seed)
+    runner = BilbyRunner(
+        sampler="dynesty",
+        nlive=nlive,
+        outdir=outdir,
+        resume=resume,
+        seed=seed,
+        dynesty_bound=dynesty_bound,
+        dynesty_sample=dynesty_sample,
+    )
     result = runner.run(ll, obs_data, context, model_obj, label=label)
 
     meta = {
@@ -389,10 +432,33 @@ def _run_single_fit(
         "log_evidence_err": result.log_evidence_err,
         "sampler": result.metadata.get("sampler"),
         "is_approximate_evidence": result.metadata.get("is_approximate_evidence", False),
+        "likelihood_mode": likelihood_mode,
+        "dynesty_bound": dynesty_bound,
+        "dynesty_sample": dynesty_sample,
         "provenance": prov.to_dict(),
     }
     _save_run_metadata(outdir, label, meta)
     return result
+
+
+def _write_gw_diagnostics_file(
+    outdir: str,
+    obs_data: Any,
+    context: dict,
+    models: list[str],
+    likelihood_mode: str,
+) -> None:
+    if not isinstance(obs_data, dict):
+        return
+    from whitesearch.validation.gw_diagnostics import run_gw_diagnostics, write_gw_diagnostics
+
+    diag = run_gw_diagnostics(
+        obs_data,
+        context,
+        models,
+        use_mf=(likelihood_mode == "mf"),
+    )
+    write_gw_diagnostics(Path(outdir) / "diagnostics.json", diag)
 
 
 def _save_run_metadata(outdir: str, label: str, meta: dict) -> None:
@@ -504,7 +570,7 @@ def _default_context(channel: str) -> dict:
     return contexts.get(channel, {})
 
 
-def _get_likelihood(channel: str, model: str):
+def _get_likelihood(channel: str, model: str, *, likelihood_mode: str = "full"):
     from whitesearch.likelihoods import (
         GWLikelihood, RadioBurstLikelihood, XRayBurstLikelihood, VisibilityLikelihood,
     )
@@ -522,12 +588,53 @@ def _get_likelihood(channel: str, model: str):
             f"Model '{model}' (native channel={model_channel}) "
             f"cannot be fit on data channel '{channel}'"
         )
+    use_full = likelihood_mode == "full"
     return {
-        "gw": GWLikelihood(model),
+        "gw": GWLikelihood(model, use_full_likelihood=use_full),
         "radio": RadioBurstLikelihood(model),
         "xray": XRayBurstLikelihood(model),
         "image": VisibilityLikelihood(),
     }[channel]
+
+
+@main.command()
+@click.option("--model", default="bounce", type=click.Choice(MODEL_CHOICES, case_sensitive=False))
+@click.option("--channel", default="gw", type=click.Choice(CHANNEL_CHOICES))
+@click.option("--data", default="mock", type=click.Choice(DATA_CHOICES))
+@click.option("--event", default=None)
+@click.option("--outdir", default=None, help="Default: artifacts/calibration/<timestamp>")
+@click.option("--n-injections", default=20, show_default=True)
+@click.option("--n-sbc", default=12, show_default=True)
+@click.option("--nlive", default=50, show_default=True)
+@click.option("--seed", default=42, show_default=True)
+@click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf")
+@click.option("--reference-amplitude/--no-reference-amplitude", default=False)
+@click.option("--force-toy/--no-force-toy", default=True, show_default=True)
+def calibrate(model, channel, data, event, outdir, n_injections, n_sbc, nlive, seed,
+              likelihood_mode, reference_amplitude, force_toy):
+    """Generate calibration report (coverage, SBC, PPC, prior audit, mock vs real)."""
+    from datetime import datetime, timezone
+    from whitesearch.validation.calibration_report import generate_calibration_report
+
+    if outdir is None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        outdir = f"artifacts/calibration/{ts}"
+    path = generate_calibration_report(
+        outdir,
+        model=model,
+        channel=channel,
+        data_source=data,
+        event=event,
+        n_injections=n_injections,
+        n_sbc=n_sbc,
+        nlive=nlive,
+        seed=seed,
+        reference_amplitude=reference_amplitude,
+        likelihood_mode=likelihood_mode,
+        force_toy=force_toy,
+    )
+    click.echo(f"Calibration report written to {path}")
+    click.echo(f"  index: {path / 'index.md'}")
 
 
 if __name__ == "__main__":
