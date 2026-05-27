@@ -1,0 +1,20 @@
+# Usage (from repo root):
+#   docker compose -f containers/docker-compose.yml build
+#   docker compose -f containers/docker-compose.yml run --rm ws compare --model bounce --data mock --channel gw
+#   docker compose -f containers/docker-compose.yml run --rm ws calibrate --profile quick
+
+services:
+  ws:
+    build:
+      context: ..
+      dockerfile: containers/Dockerfile
+    image: whitesearch:latest
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace:rw
+    environment:
+      MPLBACKEND: Agg
+      # Uncomment for fast smoke only (not for publication):
+      # WHITESEARCH_FORCE_TOY: "1"
+    stdin_open: true
+    tty: true

@@ -1,0 +1,39 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "containers/**"
+      - "src/**"
+      - "pyproject.toml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f containers/Dockerfile -t whitesearch:latest .
+
+      - name: Smoke help
+        run: docker run --rm whitesearch:latest --help
+
+      - name: Smoke compare (mock)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace whitesearch:latest \
+            compare --model bounce --null null --alt bh_ringdown \
+            --channel gw --data mock --nlive 15 --outdir artifacts/ci_docker_compare
+
+      - name: Smoke calibrate quick
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace whitesearch:latest \
+            calibrate --profile quick --outdir artifacts/ci_docker_calibrate
+          test -f artifacts/ci_docker_calibrate/index.md

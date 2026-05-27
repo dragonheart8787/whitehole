@@ -57,11 +57,30 @@ pip install -e ".[science]"
 | `tracking` | mlflow, dvc |
 | `all` | 全部 |
 
-### Docker（Linux / 完整 GW）
+### Docker（Linux / 可重現環境）
+
+需在 **repo 根目錄** 建置（context 為整個專案）：
 
 ```bash
-docker build -t whitesearch:latest containers/
+# 建置（含 science + gw + bilby/dynesty + gwpy）
+docker build -f containers/Dockerfile -t whitesearch:latest .
+
+# 或使用 compose
+docker compose -f containers/docker-compose.yml build
+
+# 核心工作流（mock）
+docker run --rm -v "%cd%:/workspace" -w /workspace whitesearch:latest \
+  compare --model bounce --null null --alt bh_ringdown --channel gw --data mock
+
+# Calibration 報表（輸出到本機 artifacts/）
+docker run --rm -v "%cd%:/workspace" -w /workspace whitesearch:latest \
+  calibrate --profile quick
+
+# 一鍵驗收（建置 + compare + calibrate）
+.\scripts\verify-docker.ps1
 ```
+
+Linux / macOS 將 `%cd%` 改為 `$(pwd)`。GWOSC 需容器可連外網且 gwpy 可用。
 
 ## 快速開始
 
@@ -126,8 +145,6 @@ whitesearch calibrate --profile standard --no-force-toy
 - **`--profile quick`**（預設）：toy sampler，數分鐘內可開 `index.md` 檢視。
 - **`--profile standard`**：dynesty，樣本較大，用於正式子集驗證。
 - **`--data mock`**：coverage 主資料；GWOSC 仍會在 `mock_vs_real/` 嘗試對照（失敗則標 `skipped`，不讓整份報告崩潰）。
-
-Docker 建置與容器內一條龍驗證**延後**，待 calibration quick 通過且 GWOSC 分階段 dynesty 穩定後再進行。
 
 ### GWOSC + dynesty 分階段驗收
 
