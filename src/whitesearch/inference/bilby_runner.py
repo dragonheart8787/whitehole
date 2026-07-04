@@ -196,7 +196,8 @@ class BilbyRunner:
             label,
         )
 
-        result = self._run_dynesty(
+        requested_kwargs = dict(self.sampler_kwargs)
+        result, actual_kwargs, bound_fallback = self._run_dynesty(
             bilby_likelihood, priors, label, bounds_to_try=[
                 self.sampler_kwargs.get("bound", "live"),
                 "multi",
@@ -217,20 +218,27 @@ class BilbyRunner:
         else:
             ll_samples = np.zeros(len(posterior))
 
+        metadata: dict[str, Any] = {
+            "sampler": self.sampler,
+            "is_approximate_evidence": False,
+            "nlive": self.nlive,
+            "label": label,
+            "elapsed_s": elapsed,
+            "seed": self.seed,
+            "sampler_kwargs": actual_kwargs,
+            "requested_sampler_kwargs": requested_kwargs,
+            "bound_fallback_occurred": bound_fallback is not None,
+        }
+        if bound_fallback is not None:
+            metadata["bound_fallback_from"] = bound_fallback[0]
+            metadata["bound_fallback_to"] = bound_fallback[1]
+
         return InferenceResult(
             log_evidence=float(result.log_evidence),
             log_evidence_err=float(result.log_evidence_err),
             posterior=posterior,
             log_likelihood_samples=ll_samples,
-            metadata={
-                "sampler": self.sampler,
-                "is_approximate_evidence": False,
-                "nlive": self.nlive,
-                "label": label,
-                "elapsed_s": elapsed,
-                "seed": self.seed,
-                "sampler_kwargs": dict(self.sampler_kwargs),
-            },
+            metadata=metadata,
         )
 
     def _run_dynesty(
@@ -239,14 +247,26 @@ class BilbyRunner:
         priors: Any,
         label: str,
         bounds_to_try: list[str],
-    ) -> Any:
+    ) -> tuple[Any, dict[str, Any], tuple[str, str] | None]:
+        """Run dynesty, trying each bound strategy in order until one succeeds.
+
+        Returns
+        -------
+        result : bilby run_sampler result
+        actual_kwargs : dict — the sampler kwargs that actually succeeded
+            (may differ from ``self.sampler_kwargs`` if a bound fallback
+            occurred).
+        bound_fallback : (from_bound, to_bound) | None — set if the first
+            bound attempted failed and a later one succeeded, so ``run()``
+            can record it in provenance rather than hiding it.
+        """
         last_exc: Exception | None = None
-        for bound in bounds_to_try:
+        for attempt, bound in enumerate(bounds_to_try):
             kw = dict(self.sampler_kwargs)
             kw["bound"] = bound
             try:
                 logger.info("dynesty bound=%s sample=%s", bound, kw.get("sample"))
-                return bilby.run_sampler(
+                result = bilby.run_sampler(
                     likelihood=bilby_likelihood,
                     priors=priors,
                     sampler=self.sampler,
@@ -258,6 +278,8 @@ class BilbyRunner:
                     save=True,
                     **kw,
                 )
+                bound_fallback = (bounds_to_try[0], bound) if attempt > 0 else None
+                return result, kw, bound_fallback
             except RuntimeError as exc:
                 last_exc = exc
                 if "ellipsoid" in str(exc).lower() or "bound" in str(exc).lower():

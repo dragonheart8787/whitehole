@@ -34,7 +34,12 @@ def prepare_gw_observation(
     strain_rms_raw = float(np.std(strain))
 
     prep = GWPreprocessor(sample_rate=sr)
-    proc = prep.prepare_raw(strain, dq_flags)
+    proc = prep.prepare_raw(
+        strain,
+        dq_flags,
+        event_gps=event_gps,
+        segment_gps_start=gps_start,
+    )
 
     strain_bp = np.asarray(proc["strain_bandpass"], dtype=np.float64)
     psd = np.asarray(proc["psd"], dtype=np.float64)

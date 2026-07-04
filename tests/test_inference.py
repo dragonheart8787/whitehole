@@ -126,6 +126,86 @@ class TestBilbyRunner:
         assert "interpretation" in df.columns or "BF_interpretation" in df.columns
 
 
+class TestDynestyBoundFallbackProvenance:
+    """Verify a bound fallback (e.g. 'live' -> 'multi') is never hidden."""
+
+    def test_bound_fallback_recorded_in_metadata(
+        self, bounce_params, gw_context, gw_sim_data, tmp_path, monkeypatch
+    ):
+        from whitesearch.inference.bilby_runner import BILBY_AVAILABLE
+
+        if not BILBY_AVAILABLE:
+            pytest.skip("bilby not installed")
+
+        import whitesearch.inference.bilby_runner as bilby_runner_mod
+
+        calls = []
+
+        def fake_run_sampler(*args, **kwargs):
+            calls.append(kwargs.get("bound"))
+            if kwargs.get("bound") == "live":
+                raise RuntimeError("ellipsoid update failed for bound=live")
+
+            class FakeResult:
+                log_evidence = -10.0
+                log_evidence_err = 0.2
+                posterior = pd.DataFrame(
+                    {"M": [60.0, 61.0], "log_likelihood": [-1.0, -1.1]}
+                )
+
+            return FakeResult()
+
+        monkeypatch.setattr(bilby_runner_mod.bilby, "run_sampler", fake_run_sampler)
+
+        runner = BilbyRunner(force_toy=False, nlive=10, outdir=str(tmp_path), seed=0)
+        model = BlackToWhiteBounce()
+        ll = GWLikelihood()
+
+        result = runner.run(ll, gw_sim_data, gw_context, model, label="bound_fallback_test")
+
+        assert calls == ["live", "multi"]
+        md = result.metadata
+        assert md["bound_fallback_occurred"] is True
+        assert md["bound_fallback_from"] == "live"
+        assert md["bound_fallback_to"] == "multi"
+        assert md["sampler_kwargs"]["bound"] == "multi"
+        assert md["requested_sampler_kwargs"]["bound"] == "live"
+
+    def test_no_fallback_when_first_bound_succeeds(
+        self, bounce_params, gw_context, gw_sim_data, tmp_path, monkeypatch
+    ):
+        from whitesearch.inference.bilby_runner import BILBY_AVAILABLE
+
+        if not BILBY_AVAILABLE:
+            pytest.skip("bilby not installed")
+
+        import whitesearch.inference.bilby_runner as bilby_runner_mod
+
+        def fake_run_sampler(*args, **kwargs):
+            class FakeResult:
+                log_evidence = -9.0
+                log_evidence_err = 0.1
+                posterior = pd.DataFrame(
+                    {"M": [60.0], "log_likelihood": [-1.0]}
+                )
+
+            return FakeResult()
+
+        monkeypatch.setattr(bilby_runner_mod.bilby, "run_sampler", fake_run_sampler)
+
+        runner = BilbyRunner(force_toy=False, nlive=10, outdir=str(tmp_path), seed=0)
+        model = BlackToWhiteBounce()
+        ll = GWLikelihood()
+
+        result = runner.run(ll, gw_sim_data, gw_context, model, label="no_fallback_test")
+
+        md = result.metadata
+        assert md["bound_fallback_occurred"] is False
+        assert "bound_fallback_from" not in md
+        assert md["sampler_kwargs"]["bound"] == "live"
+        assert md["requested_sampler_kwargs"]["bound"] == "live"
+
+
 class TestBayesFactor:
     def test_compute_returns_dict(
         self, bounce_params, gw_context, gw_sim_data, tmp_path

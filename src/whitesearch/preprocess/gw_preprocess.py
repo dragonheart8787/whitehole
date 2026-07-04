@@ -31,6 +31,15 @@ LIGO_SPECTRAL_LINES = [
 ]
 
 
+class PSDEstimationError(Exception):
+    """Raised when a PSD cannot be estimated safely (fail-closed).
+
+    In particular: when off-source data is requested but insufficient
+    off-source background is available, we refuse to silently fall back
+    to an on-source (signal-contaminated) PSD.
+    """
+
+
 class GWPreprocessor:
     """Preprocessing pipeline for gravitational wave strain data."""
 
@@ -52,8 +61,38 @@ class GWPreprocessor:
         self,
         strain: NDArray,
         dq_flags: dict | None = None,
+        *,
+        event_gps: float | None = None,
+        segment_gps_start: float | None = None,
+        background_window_duration: float | None = None,
+        min_background_windows: int = 8,
+        max_background_windows: int = 50,
     ) -> dict[str, Any]:
         """Full preprocessing pipeline from raw strain.
+
+        Parameters
+        ----------
+        event_gps, segment_gps_start : float | None
+            GPS time of the event and of the start of ``strain``.  When both
+            are given, the PSD is estimated from time-shifted *off-source*
+            background windows (excluding the on-source window around the
+            event) instead of the on-source strain itself, avoiding signal
+            self-contamination of the noise estimate.  When either is
+            missing, off-source estimation is impossible and the PSD falls
+            back to the on-source strain — this is recorded explicitly in
+            ``quality`` (never silent).
+        background_window_duration : float | None
+            Length [s] of each off-source background window.  Defaults to
+            ``self.fft_length``.  Automatically shrunk if the available
+            strain is too short to yield ``min_background_windows`` windows
+            at the requested length.
+        min_background_windows : int
+            Minimum number of off-source windows required to accept the
+            off-source PSD estimate.  If this cannot be met (even after
+            shrinking the window), estimation fails closed by raising
+            ``PSDEstimationError`` rather than reverting to on-source PSD.
+        max_background_windows : int
+            Upper bound on the number of off-source windows to average.
 
         Returns
         -------
@@ -76,12 +115,34 @@ class GWPreprocessor:
         # 3. Notch filter known spectral lines
         strain_notched = self.notch_filter(strain_bp)
 
-        # 4. Estimate PSD
-        freqs_psd, psd = estimate_psd(
-            strain_notched,
-            self.sample_rate,
-            fft_length=self.fft_length,
-        )
+        # 4. Estimate PSD — prefer off-source to avoid signal self-contamination
+        if event_gps is not None and segment_gps_start is not None:
+            freqs_psd, psd, psd_quality = self._estimate_off_source_psd(
+                strain_notched,
+                event_gps=event_gps,
+                segment_gps_start=segment_gps_start,
+                background_window_duration=background_window_duration,
+                min_background_windows=min_background_windows,
+                max_background_windows=max_background_windows,
+            )
+            quality.update(psd_quality)
+        else:
+            freqs_psd, psd = estimate_psd(
+                strain_notched,
+                self.sample_rate,
+                fft_length=self.fft_length,
+            )
+            quality["psd_source"] = "on_source"
+            quality["n_off_source_windows"] = 0
+            quality["psd_source_reason"] = (
+                "event_gps/segment_gps_start not provided; cannot identify "
+                "on-source window to exclude"
+            )
+            logger.warning(
+                "PSD estimated from on-source strain (event_gps/"
+                "segment_gps_start not provided) — this risks signal "
+                "self-contamination of the noise-weighted likelihood."
+            )
 
         # 5. Whiten
         psd_interp = self._interpolate_psd(psd, freqs_psd, strain_notched)
@@ -158,6 +219,82 @@ class GWPreprocessor:
         return backgrounds
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _estimate_off_source_psd(
+        self,
+        strain: NDArray,
+        event_gps: float,
+        segment_gps_start: float,
+        background_window_duration: float | None,
+        min_background_windows: int,
+        max_background_windows: int,
+    ) -> tuple[NDArray, NDArray, dict[str, Any]]:
+        """Estimate the PSD from time-shifted off-source background windows.
+
+        Averages (median) per-window Welch estimates instead of running a
+        single Welch estimate over the on-source strain, which would let
+        signal power leak into the noise estimate. The window length is
+        shrunk (halved) from the requested default when the available
+        strain is too short to yield ``min_background_windows`` non-excluded
+        windows at that length; if even the shrunk search fails, this fails
+        closed via ``PSDEstimationError`` instead of reverting to on-source.
+        """
+        requested_window = (
+            background_window_duration
+            if background_window_duration is not None
+            else self.fft_length
+        )
+        total_duration = len(strain) / self.sample_rate
+
+        window_duration = requested_window
+        backgrounds: list[NDArray] = []
+        for _ in range(12):
+            step = max(window_duration / 4.0, 2.0 / self.sample_rate)
+            backgrounds = self.make_background(
+                strain,
+                self.sample_rate,
+                event_gps,
+                segment_gps_start,
+                window_duration=window_duration,
+                n_background_windows=max_background_windows,
+                time_shift_step=step,
+            )
+            if len(backgrounds) >= min_background_windows:
+                break
+            if window_duration * self.sample_rate < 64:
+                break
+            window_duration /= 2.0
+
+        if len(backgrounds) < min_background_windows:
+            raise PSDEstimationError(
+                f"Insufficient off-source data for PSD estimation: found only "
+                f"{len(backgrounds)} background window(s) (need "
+                f"{min_background_windows}) around event_gps={event_gps} in "
+                f"{total_duration:.2f}s of strain. Refusing to fall back to "
+                "on-source PSD, which would self-contaminate the noise "
+                "estimate with signal power. Provide a longer data segment, "
+                "or explicitly lower min_background_windows if this is "
+                "intentional."
+            )
+
+        fft_length_use = min(self.fft_length, window_duration)
+        freqs_ref: NDArray | None = None
+        psds = []
+        for segment in backgrounds:
+            freqs_bg, psd_bg = estimate_psd(
+                segment, self.sample_rate, fft_length=fft_length_use
+            )
+            if freqs_ref is None:
+                freqs_ref = freqs_bg
+            psds.append(psd_bg)
+
+        psd_median = np.median(np.asarray(psds), axis=0)
+        quality = {
+            "psd_source": "off_source",
+            "n_off_source_windows": len(backgrounds),
+            "off_source_window_duration_s": window_duration,
+        }
+        return freqs_ref, psd_median, quality
 
     def _interpolate_psd(
         self,
