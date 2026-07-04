@@ -73,9 +73,21 @@ def gaussian_noise_from_psd(
     Returns
     -------
     noise : ndarray, shape (n_samples,) — real time-domain strain
+
+    Notes
+    -----
+    Normalised to the gw_units convention h_tilde(f) = rfft(h) * dt with
+    E[|h_tilde(f)|^2] = Sn(f) * T / 2 (one-sided), so the per-bin
+    contribution to the noise-weighted inner product <n|n> averages 2.
+    Since this function returns the time series via irfft (i.e. it fills
+    raw rfft coefficients), the per-component sigma is
+    sqrt(Sn/(4 df)) / dt.  The previous sqrt(Sn/(2 df)) filled rfft
+    coefficients as if they were already dt-scaled, leaving the generated
+    noise a factor ~2 dt^2 low in spectral power versus the stated PSD.
     """
+    dt = 1.0 / sample_rate
     df = sample_rate / n_samples
-    sigma_f = np.sqrt(psd / (2.0 * df))
+    sigma_f = np.sqrt(psd / (4.0 * df)) / dt
 
     noise_f_real = rng.standard_normal(len(psd)) * sigma_f
     noise_f_imag = rng.standard_normal(len(psd)) * sigma_f

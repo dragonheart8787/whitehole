@@ -22,8 +22,20 @@ def run_gw_diagnostics(
     n_prior_draws: int = 200,
     seed: int = 0,
     use_mf: bool = False,
+    finite_threshold: float | None = None,
 ) -> dict[str, Any]:
-    """Compute diagnostics shared across null / signal models."""
+    """Compute diagnostics shared across null / signal models.
+
+    Parameters
+    ----------
+    finite_threshold : float | None
+        Optional absolute lnL cutoff for the frac_finite statistic.  By
+        default a draw counts as finite when its lnL is finite and not at
+        the likelihood's rejection floor (``ll_min``) — a scale-free rule.
+        The previous hard-coded ``-1e5`` cutoff was tuned to mock-scale
+        data and classified every real-data draw (lnL ~ -1e6 and below)
+        as non-finite regardless of whether the template was accepted.
+    """
     strain = np.asarray(data["strain"], dtype=np.float64)
     sr = float(data.get("sample_rate", 4096.0))
     psd = np.asarray(data["psd"], dtype=np.float64)
@@ -72,7 +84,11 @@ def run_gw_diagnostics(
                 except Exception:
                     pass
 
-        finite = [x for x in logls if np.isfinite(x) and x > -1e5]
+        if finite_threshold is not None:
+            finite = [x for x in logls if np.isfinite(x) and x > finite_threshold]
+        else:
+            # Scale-free: usable = finite and not the rejection sentinel.
+            finite = [x for x in logls if np.isfinite(x) and x != ll_m.ll_min]
         out["models"][mname] = {
             "median_lnL": float(np.median(finite)) if finite else None,
             "frac_finite": len(finite) / max(n_prior_draws, 1),

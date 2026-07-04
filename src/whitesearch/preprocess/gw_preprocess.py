@@ -98,7 +98,11 @@ class GWPreprocessor:
         -------
         dict with:
             strain_whitened  : ndarray — whitened strain
-            strain_bandpass  : ndarray — bandpass-filtered strain (pre-whitening)
+            strain_bandpass  : ndarray — bandpass-filtered strain (pre-notch)
+            strain_notched   : ndarray — bandpass+notch strain; same stage
+                               the PSD is estimated from, so this is the
+                               numerator to pair with ``psd`` in
+                               noise-weighted inner products
             psd              : ndarray — one-sided PSD [Hz^{-1}]
             freqs_psd        : ndarray — PSD frequency axis [Hz]
             sample_rate      : float
@@ -155,6 +159,7 @@ class GWPreprocessor:
         return {
             "strain_whitened": strain_white,
             "strain_bandpass": strain_bp,
+            "strain_notched": strain_notched,
             "psd": psd_interp,
             "freqs_psd": freqs_psd,
             "sample_rate": self.sample_rate,

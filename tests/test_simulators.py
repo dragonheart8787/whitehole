@@ -56,6 +56,29 @@ class TestGWSimulator:
         sd = gw_simulator.simulate(bounce_params, gw_context)
         assert sd.params_true["M"] == bounce_params["M"]
 
+    def test_noise_normalization_matches_gw_units_convention(self):
+        """Generated noise must satisfy E[|rfft(n)*dt|^2] = Sn*T/2, i.e. the
+        per-bin contribution to the noise-weighted inner product averages 2
+        (the old normalisation was a factor ~2*dt^2 low)."""
+        from whitesearch.simulators.grav_wave import gaussian_noise_from_psd
+        from whitesearch.likelihoods.gw_units import time_to_freq
+
+        sr = 4096.0
+        n = int(16.0 * sr)
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        psd = np.full(len(freqs), 1e-40)
+        rng = np.random.default_rng(0)
+
+        acc = np.zeros(len(freqs))
+        n_real = 10
+        for _ in range(n_real):
+            noise = gaussian_noise_from_psd(psd, n, sr, rng)
+            _, n_f, df = time_to_freq(noise, 1.0 / sr)
+            acc += 4.0 * np.abs(n_f) ** 2 / psd * df
+        per_bin = acc / n_real
+        mean = float(per_bin[10:-10].mean())
+        assert 1.8 < mean < 2.2
+
 
 class TestEMBurstSimulator:
     def test_output_shape(self, radio_simulator, pbh_params, radio_context):

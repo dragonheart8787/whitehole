@@ -49,6 +49,48 @@ class TestNotchFilter:
             assert psd_out[i_ref] > 0.5 * psd_in[i_ref]
 
 
+class TestAnalysisStageAlignment:
+    """The likelihood numerator (analysis strain) must come from the SAME
+    preprocessing stage the PSD is estimated from (bandpass+notch).  With a
+    bandpass-only numerator, un-notched line power is divided by a
+    notch-suppressed PSD and those bins are artificially inflated."""
+
+    def test_analysis_strain_is_notched_and_line_bins_not_inflated(self):
+        from whitesearch.dataio.gw_observation import prepare_gw_observation
+        from whitesearch.likelihoods.gw_units import time_to_freq
+
+        rng = np.random.default_rng(7)
+        sr = 4096.0
+        n = int(32.0 * sr)
+        t = np.arange(n) / sr
+        # White noise plus a strong 60 Hz line (in the default notch list)
+        raw = rng.standard_normal(n) * 1e-21
+        raw += 5e-20 * np.sin(2 * np.pi * 60.0 * t)
+
+        obs = prepare_gw_observation(raw, sr, event_gps=16.0, gps_start=0.0)
+        assert obs["analysis_stage"] == "bandpass_notch"
+
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        psd = obs["psd"]
+
+        def perbin(strain):
+            _, d_f, df = time_to_freq(strain, 1.0 / sr)
+            return 4.0 * np.abs(d_f) ** 2 / psd * df
+
+        contrib_aligned = perbin(obs["strain"])            # notched numerator
+        contrib_bandpass = perbin(obs["strain_bandpass"])  # old numerator
+
+        line = np.abs(freqs - 60.0) < 0.5
+        # The aligned numerator suppresses the line exactly like the PSD's
+        # source data did; the bandpass-only numerator leaves it inflated.
+        assert contrib_bandpass[line].sum() > 100.0 * contrib_aligned[line].sum()
+
+        # Broadband (away from all notch lines) stays at a sane scale
+        away = (freqs >= 400.0) & (freqs <= 480.0)
+        med = float(np.median(contrib_aligned[away]))
+        assert 0.3 < med < 10.0
+
+
 class TestOffSourcePSD:
     def test_off_source_used_when_location_given(self, rng):
         """With event_gps/segment_gps_start supplied, PSD must come off-source."""

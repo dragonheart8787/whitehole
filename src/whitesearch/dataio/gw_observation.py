@@ -41,33 +41,40 @@ def prepare_gw_observation(
         segment_gps_start=gps_start,
     )
 
-    strain_bp = np.asarray(proc["strain_bandpass"], dtype=np.float64)
+    # Analysis strain must be the SAME preprocessing stage the PSD was
+    # estimated from (bandpass+notch), otherwise the noise-weighted inner
+    # product divides un-notched line power by a notch-suppressed PSD and
+    # inflates those bins.
+    strain_analysis = np.asarray(proc["strain_notched"], dtype=np.float64)
     psd = np.asarray(proc["psd"], dtype=np.float64)
-    strain_rms_bp = float(np.std(strain_bp))
+    strain_rms_bp = float(np.std(proc["strain_bandpass"]))
+    strain_rms_notched = float(np.std(strain_analysis))
 
     amplitude_scale = 1.0
-    if reference_amplitude and strain_rms_bp > 0:
-        amplitude_scale = target_rms / strain_rms_bp
-        strain_bp = strain_bp * amplitude_scale
+    if reference_amplitude and strain_rms_notched > 0:
+        amplitude_scale = target_rms / strain_rms_notched
+        strain_analysis = strain_analysis * amplitude_scale
         psd = psd * (amplitude_scale ** 2)
 
-    n = len(strain_bp)
+    n = len(strain_analysis)
     if event_gps is not None and gps_start is not None:
         t_merger = float(event_gps) - float(gps_start)
     else:
         t_merger = 0.5 * n / sr
 
     out: dict[str, Any] = {
-        "strain": strain_bp,
+        "strain": strain_analysis,
         "strain_raw": strain,
         "strain_whitened": proc["strain_whitened"],
         "strain_bandpass": proc["strain_bandpass"],
         "psd": psd,
         "sample_rate": sr,
         "t_merger": t_merger,
+        "analysis_stage": "bandpass_notch",
         "strain_rms_raw": strain_rms_raw,
         "strain_rms_bp": strain_rms_bp,
-        "strain_rms_used": float(np.std(strain_bp)),
+        "strain_rms_notched": strain_rms_notched,
+        "strain_rms_used": float(np.std(strain_analysis)),
         "amplitude_scale_applied": amplitude_scale,
         "reference_amplitude": reference_amplitude,
         "preprocess_quality": proc["quality"],
