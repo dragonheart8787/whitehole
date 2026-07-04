@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -154,7 +155,7 @@ def compare(
         try:
             results[m] = _run_single_fit(
                 m, channel, obs_data, context, prov, inject_model,
-                nlive=nlive, outdir=outdir, seed=seed + hash(m) % 1000,
+                nlive=nlive, outdir=outdir, seed=seed + _model_seed_offset(m),
                 resume=False, event=event, data=data, label_suffix=m,
                 likelihood_mode=likelihood_mode,
                 dynesty_bound=dynesty_bound,
@@ -237,7 +238,7 @@ def rank(models, reference, channel, data, event, inject_model, nlive, outdir, s
             sys.exit(1)
         results[m] = _run_single_fit(
             m, channel, obs_data, context, prov, inject_model,
-            nlive=nlive, outdir=outdir, seed=seed + hash(m) % 1000,
+            nlive=nlive, outdir=outdir, seed=seed + _model_seed_offset(m),
             resume=False, event=event, data=data, label_suffix=m,
         )
 
@@ -388,6 +389,16 @@ def report(run_dir, output):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _model_seed_offset(model_name: str) -> int:
+    """Deterministic per-model seed offset.
+
+    crc32 is stable across processes; the built-in hash() is randomized by
+    PYTHONHASHSEED and made the effective dynesty seed irreproducible for the
+    same --seed.
+    """
+    return zlib.crc32(model_name.encode("utf-8")) % 1000
+
+
 def _run_single_fit(
     model: str,
     channel: str,
@@ -437,6 +448,17 @@ def _run_single_fit(
         "dynesty_sample": dynesty_sample,
         "provenance": prov.to_dict(),
     }
+    # Persist the runner's actual-vs-requested sampler settings and any bound
+    # fallback so the artifact itself is auditable, not just the logs.
+    for key in (
+        "sampler_kwargs",
+        "requested_sampler_kwargs",
+        "bound_fallback_occurred",
+        "bound_fallback_from",
+        "bound_fallback_to",
+    ):
+        if key in result.metadata:
+            meta[key] = result.metadata[key]
     _save_run_metadata(outdir, label, meta)
     return result
 

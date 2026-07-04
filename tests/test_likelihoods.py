@@ -90,6 +90,97 @@ class TestGWLikelihood:
         assert ll_signal > ll_noise - 1000  # soft check
 
 
+class TestGWBandMask:
+    """The noise-weighted inner products must integrate only over the
+    analysis band [low_freq, min(high_freq, 0.95*nyquist)].  Outside it the
+    bandpassed strain and PSD are filter-rolloff residuals whose ratio is
+    numerically meaningless (on real GWOSC data it inflated <d|d> by ~1e5)."""
+
+    @staticmethod
+    def _make_obs(rng, with_out_of_band_junk):
+        sr = 4096.0
+        n = int(8.0 * sr)
+        dt = 1.0 / sr
+        df = 1.0 / (n * dt)
+        freqs = np.fft.rfftfreq(n, d=dt)
+        in_band = (freqs >= 20.0) & (freqs <= 1700.0)
+        # Flat in-band PSD; rolloff-like tiny PSD outside (as after bandpass)
+        psd = np.where(in_band, 1e-40, 1e-50)
+        # Noise consistent with the likelihood's FFT convention
+        # (h_tilde = rfft(h)*dt): E|d(f)|^2 = PSD/(2 df) makes the per-bin
+        # contribution to <d|d> = 4|d|^2/PSD*df equal 2 on average.
+        sigma = np.sqrt(psd / (4.0 * df))
+        d_f = sigma * (rng.standard_normal(len(psd)) + 1j * rng.standard_normal(len(psd)))
+        d_f[0] = d_f[0].real
+        d_f[-1] = d_f[-1].real
+        strain = np.fft.irfft(d_f / dt, n=n)
+        if with_out_of_band_junk:
+            # Rolloff residual: strain power at 1900 Hz far above the tiny
+            # PSD there (the exact pathology seen on real data above the
+            # 1700 Hz bandpass cutoff).
+            t = np.arange(n) / sr
+            strain = strain + 1e-19 * np.sin(2 * np.pi * 1900.0 * t)
+        return {
+            "strain": strain,
+            "psd": psd,
+            "sample_rate": sr,
+            "t_merger": 4.0,
+            "low_freq_cutoff": 20.0,
+            "high_freq_cutoff": 1700.0,
+        }, freqs, in_band
+
+    def test_band_mask_bounds(self):
+        freqs = np.linspace(0.0, 2048.0, 4097)
+        mask = GWLikelihood._band_mask(freqs, 20.0, 1700.0, 2048.0)
+        assert not mask[freqs < 20.0].any()
+        assert not mask[freqs > 1700.0].any()
+        assert mask[(freqs >= 20.0) & (freqs <= 1700.0)].all()
+        # high_freq above 0.95*nyquist gets capped
+        mask_hi = GWLikelihood._band_mask(freqs, 20.0, 3000.0, 2048.0)
+        assert not mask_hi[freqs > 0.95 * 2048.0].any()
+
+    def test_out_of_band_junk_does_not_inflate_inner_product(self):
+        from whitesearch.likelihoods.gw_units import time_to_freq
+        from whitesearch.utils.math_utils import noise_weighted_inner_product
+
+        rng = np.random.default_rng(3)
+        obs, freqs, in_band = self._make_obs(rng, with_out_of_band_junk=True)
+        ll = GWLikelihood("null")
+        lnl_masked = ll.loglike({}, obs, {})
+
+        # Unmasked inner product over the full grid (the old behaviour)
+        _, d_f, df = time_to_freq(obs["strain"], 1.0 / obs["sample_rate"])
+        dd_unmasked = noise_weighted_inner_product(d_f, d_f, obs["psd"], df).real
+        lnl_unmasked = -0.5 * dd_unmasked
+
+        # The 1900 Hz junk dominates the unmasked value by orders of magnitude
+        assert lnl_unmasked < 100.0 * lnl_masked  # both negative
+        # Masked value sits at the statistically expected scale:
+        # <d|d> ~ 2 * N_in_band_bins for PSD-consistent noise
+        expected = -0.5 * 2.0 * int(in_band.sum())
+        assert 0.5 < lnl_masked / expected < 2.0
+
+    def test_in_band_power_not_clipped_by_mask(self):
+        rng = np.random.default_rng(4)
+        obs_clean, _, _ = self._make_obs(rng, with_out_of_band_junk=False)
+        ll = GWLikelihood("null")
+        lnl_clean = ll.loglike({}, obs_clean, {})
+
+        # Add an *in-band* tone: masked <d|d> must grow (lnL drops)
+        n = len(obs_clean["strain"])
+        t = np.arange(n) / obs_clean["sample_rate"]
+        obs_tone = dict(obs_clean)
+        obs_tone["strain"] = obs_clean["strain"] + 1e-19 * np.sin(2 * np.pi * 100.0 * t)
+        lnl_tone = ll.loglike({}, obs_tone, {})
+        assert lnl_tone < lnl_clean - 100.0
+
+        # An out-of-band tone of the same amplitude must NOT move lnL
+        obs_oob = dict(obs_clean)
+        obs_oob["strain"] = obs_clean["strain"] + 1e-19 * np.sin(2 * np.pi * 1900.0 * t)
+        lnl_oob = ll.loglike({}, obs_oob, {})
+        assert abs(lnl_oob - lnl_clean) < 0.01 * abs(lnl_clean)
+
+
 # ── Radio Likelihood ───────────────────────────────────────────────────────────
 
 class TestRadioLikelihood:

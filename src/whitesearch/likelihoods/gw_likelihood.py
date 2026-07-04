@@ -21,8 +21,14 @@ from ..utils.math_utils import (
 )
 from ..utils.constants import G, C, M_SUN, MPC_M
 
-# Soft floor instead of -inf for dynesty stability
-LL_MIN = -1e6
+# Soft floor instead of -inf for dynesty stability.  Must sit BELOW any
+# genuine in-band log-likelihood so template-rejected points rank worst:
+# on real GWOSC data (GW150914 H1, 32 s, band-masked) the null lnL is
+# ~-5.8e7 and the worst prior-draw template lnL observed is ~-1.9e9.  The
+# previous -1e6 floor sat ABOVE all genuine values on that scale, so
+# rejected templates formed the global-maximum plateau and dynesty
+# terminated on it, returning ln Z = floor + ln(plateau prior mass).
+LL_MIN = -1e12
 HH_MIN = 1e-30
 
 
@@ -58,10 +64,12 @@ class GWLikelihood(BaseLikelihood):
         context: dict[str, Any],
     ) -> float:
         if self.model_name == "null":
-            return self._null_loglike(data)
+            return self._null_loglike(data, context)
 
         try:
-            strain, meta, sample_rate, t_merger, low_freq = self._parse_data(data, context)
+            strain, meta, sample_rate, t_merger, low_freq, high_freq = self._parse_data(
+                data, context
+            )
         except (KeyError, AttributeError, ValueError) as exc:
             return self.ll_min
 
@@ -77,10 +85,17 @@ class GWLikelihood(BaseLikelihood):
 
         _, h_template_f, _ = time_to_freq(h_template, dt)
 
+        band = self._band_mask(freqs, low_freq, high_freq, nyquist)
+        if not np.any(band):
+            return self.ll_min
+        strain_fb = strain_f[band]
+        h_template_fb = h_template_f[band]
+        psd_b = meta["psd"][band]
+
         if self.use_full:
-            ll = self._full_inner_product_loglike(strain_f, h_template_f, meta["psd"], df)
+            ll = self._full_inner_product_loglike(strain_fb, h_template_fb, psd_b, df)
         else:
-            ll = self._mf_snr_loglike(strain_f, h_template_f, meta["psd"], df)
+            ll = self._mf_snr_loglike(strain_fb, h_template_fb, psd_b, df)
 
         if not np.isfinite(ll):
             return self.ll_min
@@ -88,7 +103,7 @@ class GWLikelihood(BaseLikelihood):
 
     def _parse_data(
         self, data: Any, context: dict[str, Any]
-    ) -> tuple[NDArray, dict, float, float, float]:
+    ) -> tuple[NDArray, dict, float, float, float, float]:
         strain = np.asarray(
             data.data if hasattr(data, "data") else data["strain"],
             dtype=np.float64,
@@ -98,16 +113,44 @@ class GWLikelihood(BaseLikelihood):
         sample_rate = float(meta.get("sample_rate", 4096.0))
         t_merger = float(meta.get("t_merger", context.get("t_merger", 0.5)))
         low_freq = float(meta.get("low_freq_cutoff", context.get("low_freq_cutoff", 20.0)))
+        high_freq = float(
+            meta.get("high_freq_cutoff", context.get("high_freq_cutoff", 1700.0))
+        )
         meta = dict(meta) if isinstance(meta, dict) else {"psd": psd}
         meta["psd"] = psd
         meta["sample_rate"] = sample_rate
         meta["low_freq_cutoff"] = low_freq
-        return strain, meta, sample_rate, t_merger, low_freq
+        meta["high_freq_cutoff"] = high_freq
+        return strain, meta, sample_rate, t_merger, low_freq, high_freq
 
-    def _null_loglike(self, data: Any) -> float:
-        strain, meta, sample_rate, _, _ = self._parse_data(data, {})
-        _, strain_f, df = time_to_freq(strain, 1.0 / sample_rate)
-        inner = noise_weighted_inner_product(strain_f, strain_f, meta["psd"], df)
+    @staticmethod
+    def _band_mask(
+        freqs: NDArray,
+        low_freq: float,
+        high_freq: float,
+        nyquist: float,
+    ) -> NDArray:
+        """Boolean mask restricting inner products to the analysis band.
+
+        Outside [low_freq, min(high_freq, 0.95*nyquist)] the bandpassed
+        strain and the PSD are both filter-rolloff residuals; their ratio is
+        numerically meaningless and (on real data) dominates ⟨d|d⟩ by orders
+        of magnitude if included.
+        """
+        f_hi = min(high_freq, 0.95 * nyquist)
+        return (freqs >= low_freq) & (freqs <= f_hi)
+
+    def _null_loglike(self, data: Any, context: dict[str, Any] | None = None) -> float:
+        strain, meta, sample_rate, _, low_freq, high_freq = self._parse_data(
+            data, context or {}
+        )
+        freqs, strain_f, df = time_to_freq(strain, 1.0 / sample_rate)
+        band = self._band_mask(freqs, low_freq, high_freq, sample_rate / 2.0)
+        if not np.any(band):
+            return self.ll_min
+        inner = noise_weighted_inner_product(
+            strain_f[band], strain_f[band], meta["psd"][band], df
+        )
         ll = float(-0.5 * inner.real)
         return ll if np.isfinite(ll) else self.ll_min
 
