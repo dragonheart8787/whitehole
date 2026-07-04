@@ -17,7 +17,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import butter, sosfilt, iirnotch, sosfiltfilt
+from scipy.signal import butter, sosfilt, iirnotch, sosfiltfilt, tf2sos
 
 from ..utils.math_utils import estimate_psd, whiten
 
@@ -177,7 +177,8 @@ class GWPreprocessor:
                 continue
             Q = 30.0
             b, a = iirnotch(f0, Q, fs=self.sample_rate)
-            result = np.convolve(result, b, mode="same")
+            sos = tf2sos(b, a)
+            result = sosfiltfilt(sos, result)
         return result
 
     @staticmethod
