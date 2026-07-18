@@ -31,6 +31,17 @@ from ..utils.constants import G, C, M_SUN, MPC_M
 LL_MIN = -1e12
 HH_MIN = 1e-30
 
+# Tukey taper fraction applied before every rfft on the GW likelihood path
+# (strain AND template, so the residual d-h sees identical windowing).
+# alpha=0.1 matches the taper already used when constructing mock injected
+# signals in simulators/grav_wave.py, keeping the mock and real-data paths
+# on the same convention; it also sits at the low end of the 0.1-0.25 range
+# common in LIGO/Virgo analyses, tapering only the outer 5% of samples at
+# each edge of the 32 s segment so a merger centred well away from the edges
+# (t_merger ~ mid-segment) is essentially untouched. See time_to_freq() in
+# gw_units.py for why no additional power-compensation factor is applied.
+TAPER_ALPHA = 0.1
+
 
 class GWLikelihood(BaseLikelihood):
     """Frequency-domain GW likelihood for bounce / BH ringdown / null."""
@@ -75,7 +86,7 @@ class GWLikelihood(BaseLikelihood):
 
         n = len(strain)
         dt = 1.0 / sample_rate
-        freqs, strain_f, df = time_to_freq(strain, dt)
+        freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=TAPER_ALPHA)
         nyquist = sample_rate / 2.0
 
         times = np.arange(n) * dt
@@ -83,7 +94,10 @@ class GWLikelihood(BaseLikelihood):
         if h_template is None:
             return self.ll_min
 
-        _, h_template_f, _ = time_to_freq(h_template, dt)
+        # Same taper as the strain above: the residual strain_f - template_f
+        # must see identical windowing or the mismatch shows up as spurious
+        # power at the band edges.
+        _, h_template_f, _ = time_to_freq(h_template, dt, taper_alpha=TAPER_ALPHA)
 
         band = self._band_mask(freqs, low_freq, high_freq, nyquist)
         if not np.any(band):
@@ -144,7 +158,7 @@ class GWLikelihood(BaseLikelihood):
         strain, meta, sample_rate, _, low_freq, high_freq = self._parse_data(
             data, context or {}
         )
-        freqs, strain_f, df = time_to_freq(strain, 1.0 / sample_rate)
+        freqs, strain_f, df = time_to_freq(strain, 1.0 / sample_rate, taper_alpha=TAPER_ALPHA)
         band = self._band_mask(freqs, low_freq, high_freq, sample_rate / 2.0)
         if not np.any(band):
             return self.ll_min

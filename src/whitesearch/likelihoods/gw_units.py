@@ -9,13 +9,40 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    from scipy.signal.windows import tukey
+except ImportError:  # pragma: no cover - older scipy layout
+    from scipy.signal import tukey  # type: ignore[attr-defined]
 
-def time_to_freq(strain: NDArray, dt: float) -> tuple[NDArray, NDArray, float]:
-    """Return (freqs_hz, strain_f, df)."""
+
+def time_to_freq(
+    strain: NDArray, dt: float, taper_alpha: float = 0.0
+) -> tuple[NDArray, NDArray, float]:
+    """Return (freqs_hz, strain_f, df).
+
+    Parameters
+    ----------
+    taper_alpha : float
+        Tukey-window fraction applied to the time series before the rfft
+        (0.0 = no taper, the historical/default behaviour). A full-segment
+        strain array FFT'd with an implicit rectangular window has sidelobe
+        leakage that a Welch-estimated PSD (built from short, Hann-windowed
+        segments) does not describe, inflating noise-weighted inner products
+        near the analysis band edges. Callers on the GW likelihood path pass
+        a nonzero value explicitly; this default keeps every other caller
+        (mocks, other channels, existing tests) on the old behaviour.
+        No power-compensation factor is applied: the taper only touches the
+        outer `taper_alpha/2` fraction of samples at each edge, and both the
+        data and any template compared against it must be tapered with the
+        same alpha (identical windowing cancels in the residual) so a signal
+        away from the segment edges is not attenuated.
+    """
     strain = np.asarray(strain, dtype=np.float64)
     n = len(strain)
     df = 1.0 / (n * dt)
     freqs = np.fft.rfftfreq(n, d=dt)
+    if taper_alpha > 0.0:
+        strain = strain * tukey(n, alpha=taper_alpha)
     strain_f = np.fft.rfft(strain) * dt
     return freqs, strain_f, df
 

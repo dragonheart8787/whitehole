@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..likelihoods.gw_likelihood import GWLikelihood
+from ..likelihoods.gw_likelihood import TAPER_ALPHA, GWLikelihood
 from ..likelihoods.gw_units import inner_product_norm, time_to_freq
 from ..models import get_model
 from ..utils.math_utils import matched_filter_snr
@@ -40,7 +40,9 @@ def run_gw_diagnostics(
     sr = float(data.get("sample_rate", 4096.0))
     psd = np.asarray(data["psd"], dtype=np.float64)
     dt = 1.0 / sr
-    freqs, strain_f, df = time_to_freq(strain, dt)
+    # Match the windowing GWLikelihood.loglike() applies internally so the
+    # matched-filter SNR diagnostic below reflects what the likelihood sees.
+    freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=TAPER_ALPHA)
 
     out: dict[str, Any] = {
         "strain_rms_raw": data.get("strain_rms_raw"),
@@ -79,7 +81,7 @@ def run_gw_diagnostics(
                         freqs, sr / 2, float(context.get("low_freq_cutoff", 20.0)),
                     )
                     if h is not None:
-                        _, hf, _ = time_to_freq(h, dt)
+                        _, hf, _ = time_to_freq(h, dt, taper_alpha=TAPER_ALPHA)
                         snrs.append(matched_filter_snr(hf, strain_f, psd, df))
                 except Exception:
                     pass
