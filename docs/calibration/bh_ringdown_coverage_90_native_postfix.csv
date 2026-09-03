@@ -1,0 +1,4 @@
+parameter,coverage_90pct,coverage_ok,sbc_n,sbc_rank_mean,sbc_rank_std
+M,0.895,True,200,334.845,223.22517997528863
+a_star,0.905,True,200,313.51,216.31645776500687
+log10_A,0.89,True,200,356.415,223.05266816382178

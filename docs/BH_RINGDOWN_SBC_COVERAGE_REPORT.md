@@ -1,5 +1,11 @@
 # `bh_ringdown` 推論機制校準驗證報告（SBC / Coverage）
 
+> **文件狀態（2026-09-03 更新）**：第 1–9 節是**第一輪（修正前）**的原始紀錄，內容保持不變。
+> 第一輪發現的 (A)、(B)、(D) 與工具面 (E1) 已於 commit `01ba53e` 修正，並用同規模的
+> SBC/coverage 重跑驗證——**修正後三個參數（`M`、`a_star`、`log10_A`）全部校準良好**。
+> 修正內容、重跑數字與並排比較見 **§10**。發現 (C)（第五輪 taper 在 mock 路徑失效）**尚未處理**，
+> 仍然成立。
+
 ## 範圍聲明
 
 **這份文件記錄的是 WhiteSearch 推論機制（bilby + dynesty + 現有 priors）在 `bh_ringdown` 模型
@@ -9,8 +15,9 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 「給定先驗與模擬器，推論出來的 posterior 與 evidence 是否自我一致」這件純統計/工程的事情。所有
 資料皆為 mock 模擬資料，未使用任何真實 GWOSC 觀測資料。
 
-本輪工作**沒有修改任何 production 模組**。所有數字都是在既有程式碼原封不動的狀態下量到的；
-發現的問題一律照 fail-closed 原則如實回報，未自行調整先驗、模型或判定門檻。
+第一輪工作**沒有修改任何 production 模組**。第 1–9 節的數字都是在既有程式碼原封不動的狀態下
+量到的；發現的問題一律照 fail-closed 原則如實回報，未自行調整先驗、模型或判定門檻。
+第二輪（§10）才動手修正，且修正的是模型規格與先驗映射，不是判定門檻。
 
 ---
 
@@ -319,3 +326,151 @@ mock 雜訊是由 `gaussian_noise_from_psd()` 用 `irfft` 直接從 PSD 生成�
 **無。** 本輪沒有為了讓驗證流程能跑而修改任何 production 模組——所有 driver script 都在 repo 之外，
 Campaign C 的 `TAPER_ALPHA=0.0` 是 script 內的執行期覆寫。既有測試套件在本輪開始前跑過一次確認基準：
 **121 passed, 1 skipped, 1 deselected**。
+
+---
+
+# 10. 第二輪：修正後重新驗證
+
+> 本節記錄對第一輪發現 (A)、(B)、(D) 與工具面 (E1) 的修正，以及用**同規模、同設定**重跑的
+> SBC/coverage 結果。發現 (C) 依決策**不在本輪範圍內**，未觸碰。
+> 本節同樣只描述 `bh_ringdown` 模型規格對齊與先驗映射修正後的推論機制校準品質，
+> 不含任何天文物理宣稱。
+
+## 10.1 修正內容（commit `01ba53e`）
+
+| 對應發現 | 檔案 | 改動 | 預期解決什麼 |
+|---|---|---|---|
+| **(B)** | `models/alternatives.py` | `StandardBHRingdown.parameters()` 移除 `D_L`、`i`，只留 `M, a_star, log10_A`；`summary_stats()` 移除 `D_L_mpc`；docstring 記錄它是「自由振幅 nuisance 參數的 phenomenological ringdown」 | 宣告的參數向量與 likelihood 實際讀的參數一致；不再對 likelihood 完全平坦的兩個方向取樣 |
+| **(B)** | `likelihoods/gw_likelihood.py` | `parameter_names` 的非 null／非 bounce 分支回傳 `["M","a_star","log10_A"]` | bilby likelihood 參數與 prior keys 對齊 |
+| **(B)** | `simulators/grav_wave.py` | 參數含 `log10_A` 時改用 `A_rd = 10**log10_A`（與 `_build_template()` 的 bh_ringdown 分支同一式子）；bounce 的 `M/D_L/i` 距離+天線路徑完全不動（分支條件是 `log10_A` 是否存在，bounce 只有 `log10_A_bounce`）；metadata 新增 `A_rd`、`amplitude_source` 記錄實際走了哪條路 | **恢復 SBC 的前提**：資料由 likelihood 假設的同一個 `p(θ)p(d\|θ)` 生成 |
+| **(D)** | `models/alternatives.py` | 新增 `BAND_LOW_HZ=20.0` / `BAND_HIGH_HZ=1700.0`（取自 `configs/instruments/ligo.yaml` 的 `preprocessing.{low,high}_freq_cutoff`）與 `_m_prior_bounds_for_band()`；`M` prior 從 `log_uniform(5, 1000)` 收窄為 `log_uniform(20, 590)` | 每一筆先驗抽樣的 QNM 頻率都落在 likelihood 看得見的頻帶內 |
+| **(A)** | `models/base.py` | `cos_uniform` → `bilby.core.prior.Sine`（支撐 `[0, π]`、密度 ∝ sin）取代錯誤的 `Cosine`（`[-π/2, π/2]`、密度 ∝ cos）；補上 `half_normal` → `HalfNormal`、`beta` → `Beta`；`case _` 改為 **raise**，不再 silent fallback 成 `Uniform(0,1)` | 抽真值與做推論用的是同一個先驗分布 |
+| **工具面 (E1)** | `validation/sbc.py` | `_compute_uniformity` 改用 `stats.kstest(u, "uniform")`，`u = (rank + 0.5)/(L + 1)` | 同一組 ranks 的 p 值與 `calibrated` 判定變成確定性 |
+
+`M` 界限的推導（寫在 `_m_prior_bounds_for_band()` 裡，不是硬編報告數字）：`kerr_qnm_frequency`
+給 `f = k(a)/M`，`k` 對自旋單調遞增，所以要讓 `a_star ∈ [0, 0.998]` 全域落在頻帶內需要
+`M ≥ k(0.998)/f_high = 19.13` 且 `M ≤ k(0)/f_low = 594.88`。取 `[20, 590]` 留安全邊界。
+
+**物理範圍檢查（不為了讓 SBC 過關硬縮）**：20–590 M⊙ 涵蓋恆星質量 BBH 殘骸到 IMBH 區間
+（GW150914 殘骸 ≈62 M⊙、GW170814 ≈53 M⊙、GW190521 ≈142 M⊙），沒有窄到不合理。
+**但要如實標註一個保守性**：下界 20 M⊙ 是由**最高自旋**（`a_star = 0.998`，f_rd = 1626 Hz）決定的；
+低自旋時更輕的殘骸（例如 M = 10、`a_star` = 0 的 f_rd = 1190 Hz）其實仍在頻帶內，卻被這個獨立先驗
+一併排除了。要放寬需要 `(M, a_star)` 的**聯合**先驗，現有的獨立 `ParameterSpec` 機制表達不了。
+這是已知的保守取捨，不是一個已解決的問題。
+
+## 10.2 重跑設定（與第一輪逐項相同）
+
+`SBCRunner` N=200、L=100、`InjectionRecovery` N=200（`ci_level=0.90`）、dynesty `nlive=250`、
+`likelihood_mode=full`、seed=20260901、context 與 §3 相同。`nlive=250` 沿用 §3.1 的理由。
+provenance：**200/200 成功、0 次 bound fallback、0 次 sampler 例外**，`sampler` 全部是 dynesty、
+`is_approximate_evidence=False`；posterior 樣本數最小 344（≫ L=100）；SBC campaign 總計 10847 s。
+
+先驗抽樣的注入頻率：**f_rd ∈ [23.7, 1093.6] Hz，0/200 落在 [20, 1700] 之外**
+（第一輪是 34/200 在頻帶外，其中 25 筆被 `_build_template()` 直接拒絕）。
+
+## 10.3 SBC rank statistics（修正後）
+
+L=100，rank ∈ {0,…,100}；`ks_p` 是模組修正後自己算出來的確定性單樣本 KS 值（本節表格中
+`module_ks_p` 與獨立重算的 `ks_p` 完全相同，確認 §10.1 的 (E1) 修正正確）。
+
+| 參數 | rank 平均（期望 50.0） | rank 標準差（期望 29.15） | frac rank=0 | frac rank=L | KS p | χ² p | 判定 |
+|---|---|---|---|---|---|---|---|
+| `M` | 50.46 | 30.18 | 0.015 | 0.020 | **0.813** | 0.509 | **PASS** |
+| `a_star` | 46.87 | 28.63 | 0.010 | 0.005 | **0.133** | 0.114 | **PASS** |
+| `log10_A` | 52.35 | 29.26 | 0.010 | 0.015 | **0.421** | 0.760 | **PASS** |
+
+Rank 直方圖（20 bins，N=200，均勻期望每格 10）：
+
+```
+M        14  9  8  8 14 10 15  8  9  3  8 14  7  9  9  8 15 10 11 11
+a_star   18  4 10 10 17 12  9  9 11 10 11 13 12  5  6 11  6  8 13  5
+log10_A   8 13 12  7  6  6  8 14 12 10  6 13 11  8 13  9  9 14  9 12
+```
+
+對照第一輪的 `log10_A`（`68 0 4 1 … 1 110`，兩端各 32.5%／53.0%）與 `i`
+（`0 0 … 15 143`，64% 頂在上界），極端堆積已經完全消失。
+
+## 10.4 Coverage（修正後）
+
+括號內為二項式標準誤。
+
+| 參數 | 名目 50% | 名目 68% | 名目 90% | `_evaluate_coverage` 判定（`0.8 ≤ cov90 ≤ 1.0`） |
+|---|---|---|---|---|
+| `M` | 0.455 (±0.035) | 0.640 (±0.034) | **0.895** (±0.022) | PASS |
+| `a_star` | 0.490 (±0.035) | 0.690 (±0.033) | **0.905** (±0.021) | PASS |
+| `log10_A` | 0.515 (±0.035) | 0.655 (±0.034) | **0.890** (±0.022) | PASS |
+
+九個數字全部落在名目值的 1.3σ 以內（最大偏離是 `M` 的 50%：0.455 vs 0.50，1.3σ）。
+
+## 10.5 修正前後並排
+
+| 參數 | rank 平均 前 → 後 | KS p 前 → 後 | coverage 68% 前 → 後 | coverage 90% 前 → 後 |
+|---|---|---|---|---|
+| `M` | 38.03 → **50.46** | 1.1e-07 → **0.813** | 0.585 → **0.640** | 0.795 → **0.895** |
+| `a_star` | 45.48 → **46.87** | 0.075 → **0.133** | 0.650 → **0.690** | 0.855 → **0.905** |
+| `log10_A` | 60.10 → **52.35** | 6.5e-52 → **0.421** | 0.085 → **0.655** | 0.115 → **0.890** |
+| `D_L` | （已移除：likelihood 從未讀取） | — | — | — |
+| `i` | （已移除：likelihood 從未讀取） | — | — | — |
+
+改善幅度：
+
+- **`log10_A`** 從**確定性失敗**（KS p = 6.5e-52，90% CI 只覆蓋 11.5% 的真值）變成校準良好
+  （p = 0.421、覆蓋 89.0%）。這直接對應 (B)：模擬器現在用的振幅公式跟 likelihood 一樣。
+- **`M`** 從 KS p = 1.1e-07 變成 0.813；90% coverage 從 0.795（未達 `_evaluate_coverage`
+  的 0.8 下限）升到 0.895。第一輪把注入限制在頻帶內時 `M` 的 coverage 是 0.892——
+  **修正後的 0.895 與那個條件值一致**，證實 (D) 的診斷正確：問題就是先驗支撐超出可分析頻帶，
+  不是別的東西。
+- **`a_star`** 從邊際（p = 0.075）變成 p = 0.133。它仍然是三個裡最弱的，但已無不校準的證據。
+- **`D_L`／`i`** 已從模型移除，不再需要驗證。第一輪 `D_L` 作為正對照組校準完美這件事，
+  是判斷「SBC 工具鏈本身沒問題」的依據，本輪修正沒有動到那條邏輯。
+
+## 10.6 一句話結論（第二輪）
+
+**修正 (A)(B)(D) 之後，`bh_ringdown` 模型的三個自由參數 `M`、`a_star`、`log10_A` 在
+SBC rank 均勻性（KS p = 0.813 / 0.133 / 0.421，全部 > 0.05）與 credible interval coverage
+（90% 名目下實測 0.895 / 0.905 / 0.890）上都校準良好，沒有任何一個參數仍然校準不良，
+也沒有可辨識的系統性 posterior 過窄或過寬。**
+
+## 10.7 仍然成立、未在本輪處理的事項
+
+1. **發現 (C) 完全未觸碰**（依決策）。第五輪 taper 在 mock 路徑上造成的頻譜洩漏依舊：
+   本輪 200 組的 median `ln_Z` = −8.91×10¹⁰、median **`ln_Z_err` = 441.8 nats**
+   （第一輪是 533.8 nats；差異來自參數數量與先驗範圍改變，不是 (C) 有任何改善）。
+   如 §6(C) 所述，這**不影響 posterior 的校準**（本節數字就是證據），但 evidence 的精度
+   在 mock 上仍然是壞的——而 evidence 正是排序引擎的核心輸出。
+2. **`discrete_uniform` 的 bilby 映射同樣是錯的，本輪刻意未修**。`ParameterSpec.sample()`
+   從 `values` 均勻抽樣，`to_bilby_prior()` 卻回傳 `DeltaFunction(values[0])`——等於把
+   `bounce` 的 `p_lifetime`（`values=[4, 5]`）在 dynesty 裡釘死在 4。這與 (A) 是同一個
+   bug 家族，但 bilby 2.8 的 `Categorical` 只涵蓋 `0..n-1`，對 `[4, 5]` 這種偏移集合沒有
+   等價類別；改成 raise 會直接讓 bounce 的 dynesty 路徑停擺，超出本輪範圍。
+   目前的處置：程式碼裡標成 `KNOWN MISMATCH`，並在
+   `tests/test_prior_mapping.py::test_bilby_prior_matches_sample_prior` 以
+   `xfail(strict=True)` 鎖住（若有人修好而未移除 marker，測試會轉紅）。**待決策**。
+3. **`M` 先驗下界的保守性**（見 §10.1）：需要 `(M, a_star)` 聯合先驗才能放寬。
+4. **N=200 的檢定力限制**：`SBCRunner` docstring 建議 N ≥ 1000。`a_star` 的 p = 0.133
+   只能說「沒有證據顯示不校準」，不能宣稱已排除小幅偏差。
+5. **PPC 仍未執行**。(B) 修好之後 posterior predictive 的比對對象已經明確，可以做，
+   但不在本輪指定範圍內。
+
+## 10.8 測試
+
+`pytest`：**147 passed, 1 skipped, 1 deselected, 1 xfailed**
+（第一輪基準 121 passed, 1 skipped, 1 deselected；新增 26 個通過 + 1 個刻意的
+`discrete_uniform` xfail，無非預期 regression）。
+
+新增測試檔：
+
+| 檔案 | 內容 |
+|---|---|
+| `tests/test_prior_mapping.py` | 對 `PriorType` Literal 裡**每一種**類型比對 `sample()` 與 `to_bilby_prior().sample()` 的經驗分布（各 20000 抽樣，兩樣本 KS）；「新增類型必須同步更新本檔」的守門測試；`cos_uniform → Sine` 具名斷言；未知類型必須 raise；每個註冊模型都能建出 bilby priors |
+| `tests/test_bh_ringdown_alignment.py` | 模型／likelihood 參數向量一致且無死參數；模擬器注入振幅 == `10**log10_A` 且對它有反應；bounce 的距離／天線路徑未被動到；`M` prior 兩端 × 自旋兩端都在頻帶內、且在解析推導的界限內；500 次先驗抽樣沒有一次被 `_build_template()` 拒絕；頻帶常數與 `configs/instruments/ligo.yaml` 一致 |
+| `tests/test_sbc_statistics.py` | 同一組 ranks 連呼叫 5 次 p 值與判定完全相同；不受全域 numpy RNG 影響；正規化分母是 L+1；均勻 ranks 通過、堆在邊界的 ranks 失敗 |
+
+## 10.9 第二輪產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `docs/calibration/bh_ringdown_sbc_rank_statistics_postfix.csv` | 修正後 rank 統計與檢定結果 | 是 |
+| `docs/calibration/bh_ringdown_coverage_postfix.csv` | 修正後 50%/68%/90% coverage | 是 |
+| `docs/calibration/bh_ringdown_coverage_90_native_postfix.csv` | `InjectionRecoveryResult.summary()` 原生輸出 | 是 |
+| `artifacts/calibration/bh_ringdown_sbc/sbc_v2/rank_hist_*.png`, `ranks.json`, `per_simulation.csv` | rank 直方圖與每次 sim 的 provenance | 否（`artifacts/` 在 `.gitignore` 內） |
