@@ -66,7 +66,12 @@ class GWLikelihood(BaseLikelihood):
                 "log10_A_bounce", "log10_tau_bounce_yr",
                 "D_L", "i",
             ]
-        return ["M", "a_star", "log10_A", "D_L", "i"]
+        # bh_ringdown (and any other non-bounce GW model routed here) is a
+        # phenomenological ringdown: the template amplitude is the free
+        # log10_A used by _build_template() below.  D_L and i used to be
+        # listed here but never entered the bh_ringdown template, so the
+        # sampler explored two parameters the likelihood was flat in.
+        return ["M", "a_star", "log10_A"]
 
     def loglike(
         self,

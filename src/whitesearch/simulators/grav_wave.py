@@ -155,7 +155,6 @@ class GravitationalWaveSimulator(BaseSimulator):
         # ── Derive waveform parameters ─────────────────────────────────────────
         M = params["M"]
         a = params["a_star"]
-        i = params.get("i", 0.0)
 
         f_gr, q_gr = kerr_qnm_frequency(M, a)
 
@@ -165,13 +164,26 @@ class GravitationalWaveSimulator(BaseSimulator):
         f_rd = f_gr * (1.0 + eps_f)
         q_rd = max(0.5, q_gr * (1.0 + eps_Q))
 
-        # Ringdown amplitude: h_0 ~ G M / (c^2 D_L)
-        D_L_m = params.get("D_L", 100.0) * 3.086e22
-        h0 = float(G * M * M_SUN / (C**2 * D_L_m))
-
-        # Antenna projection
-        fp, fc = antenna_response(i)
-        A_rd = h0 * np.sqrt(fp**2 + fc**2)
+        # ── Ringdown amplitude ────────────────────────────────────────────────
+        # Models carrying an explicit free amplitude (log10_A, i.e. the
+        # phenomenological bh_ringdown model) use it directly, byte-for-byte
+        # the same expression as GWLikelihood._build_template()'s bh_ringdown
+        # branch.  Deriving the amplitude from M/D_L/i here while the
+        # likelihood read 10**log10_A meant the simulator and the likelihood
+        # were different forward models, which invalidates SBC.
+        # Models that parameterise the amplitude physically (bounce: M, D_L,
+        # inclination) keep the distance/antenna path unchanged.
+        if "log10_A" in params:
+            amplitude_source = "log10_A"
+            A_rd = float(10.0 ** params["log10_A"])
+            h0 = A_rd
+        else:
+            amplitude_source = "M_D_L_inclination"
+            i = params.get("i", 0.0)
+            D_L_m = params.get("D_L", 100.0) * 3.086e22
+            h0 = float(G * M * M_SUN / (C**2 * D_L_m))
+            fp, fc = antenna_response(i)
+            A_rd = h0 * np.sqrt(fp**2 + fc**2)
 
         # ── Build signal ───────────────────────────────────────────────────────
         h_plus = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)
@@ -217,6 +229,8 @@ class GravitationalWaveSimulator(BaseSimulator):
                 "f_rd": f_rd,
                 "q_rd": q_rd,
                 "h0": h0,
+                "A_rd": A_rd,
+                "amplitude_source": amplitude_source,
                 "low_freq_cutoff": low_freq,
             },
             params_true=params,

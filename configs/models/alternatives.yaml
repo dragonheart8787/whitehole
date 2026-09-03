@@ -18,7 +18,13 @@ models:
   - name: bh_ringdown
     class: StandardBHRingdown
     channel: gw
-    description: Standard GR black hole ringdown (eps_f = eps_Q = 0).
+    description: >
+      Phenomenological GR black hole ringdown (eps_f = eps_Q = 0), free
+      parameters M, a_star, log10_A. The peak strain is a free nuisance
+      parameter rather than a function of (D_L, i): a single-detector
+      ringdown-only analysis cannot separate distance from inclination.
+      M is bounded so f_QNM stays inside preprocessing.low/high_freq_cutoff
+      for every spin in the a_star prior.
     gate: must achieve ln_BF(bounce/bh_ringdown) > 3 for publication.
 
   - name: bh_accretion

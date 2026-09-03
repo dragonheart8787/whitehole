@@ -164,7 +164,16 @@ class ParameterSpec:
                     unit=self.unit,
                 )
             case "cos_uniform":
-                return bp.Cosine(
+                # ``sample()`` above draws arccos(U(-1,1)), i.e. support
+                # [0, pi] with density proportional to sin(x) -- which bilby
+                # calls Sine, NOT Cosine.  bilby's Cosine is support
+                # [-pi/2, +pi/2] with density proportional to cos(x): a
+                # different distribution on a different interval, so 50% of
+                # prior draws fell outside the sampler's support and SBC
+                # ranks for inclination piled up at the upper bound.
+                return bp.Sine(
+                    minimum=0.0,
+                    maximum=float(np.pi),
                     name=self.name,
                     latex_label=self.latex or self.name,
                     unit=self.unit,
@@ -178,16 +187,46 @@ class ParameterSpec:
                     latex_label=self.latex or self.name,
                     unit=self.unit,
                 )
+            case "half_normal":
+                return bp.HalfNormal(
+                    sigma=self.prior_kwargs["sigma"],
+                    name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
+                )
+            case "beta":
+                return bp.Beta(
+                    alpha=self.prior_kwargs["a"],
+                    beta=self.prior_kwargs["b"],
+                    minimum=0.0,
+                    maximum=1.0,
+                    name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
+                )
             case "discrete_uniform":
+                # KNOWN MISMATCH, deliberately left in place and covered by
+                # an xfail(strict=True) case in
+                # tests/test_prior_mapping.py::test_bilby_prior_matches_sample_prior.
+                # ``sample()`` draws uniformly from ``values``; DeltaFunction
+                # pins the sampler to values[0].  bilby 2.8's Categorical only
+                # covers 0..n-1, so an offset set such as bounce's
+                # p_lifetime = [4, 5] has no faithful bilby equivalent here.
+                # Raising instead would take bounce's dynesty path offline,
+                # so the fix (re-parameterise, or add a prior class) is left
+                # as an explicit decision rather than made silently.
                 return bp.DeltaFunction(
                     peak=self.prior_kwargs["values"][0],
                     name=self.name,
                 )
             case _:
-                return bp.Uniform(
-                    minimum=0.0,
-                    maximum=1.0,
-                    name=self.name,
+                # fail-closed: never silently substitute Uniform(0, 1) for a
+                # prior we do not know how to translate.
+                raise ValueError(
+                    f"No bilby prior mapping for prior_type={self.prior_type!r} "
+                    f"(parameter {self.name!r}). Add an explicit case to "
+                    "ParameterSpec.to_bilby_prior() rather than relying on a "
+                    "default."
                 )
 
 

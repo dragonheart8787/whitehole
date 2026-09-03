@@ -180,29 +180,89 @@ class GRBAfterglowFRB(BaseModel):
         }
 
 
-class StandardBHRingdown(BaseModel):
-    """Standard GR black hole ringdown (alternative to bounce model in GW channel).
+# Analysis band the GW likelihood can actually see, taken from
+# configs/instruments/ligo.yaml -> preprocessing.{low,high}_freq_cutoff, which
+# is what GWLikelihood._parse_data() falls back to and what
+# GWLikelihood._band_mask() then clips at min(high_freq_cutoff, 0.95*nyquist)
+# (1945.6 Hz at the configured 4096 Hz sample rate, so high_freq_cutoff binds).
+BAND_LOW_HZ = 20.0
+BAND_HIGH_HZ = 1700.0
 
-    No frequency or quality-factor deviations from Kerr QNM predictions.
+
+class StandardBHRingdown(BaseModel):
+    """Phenomenological GR black hole ringdown (GW-channel comparison model).
+
+    Damped-sinusoid ringdown at the Kerr QNM frequency and quality factor for
+    ``(M, a_star)`` with **no** frequency or quality-factor deviations, and a
+    free peak strain amplitude ``log10_A``.
+
+    Why the amplitude is a free nuisance parameter rather than a function of
+    ``(D_L, i)``: a single-detector, ringdown-only analysis cannot separate
+    luminosity distance from inclination -- they enter only through one overall
+    amplitude -- so this model does not attempt the physical decomposition that
+    ``BlackToWhiteBounce`` makes.  ``bh_ringdown`` is the comparison model in
+    this project, not the target of a distance/inclination measurement.
+    ``D_L`` and ``i`` were previously declared here but never entered
+    ``GWLikelihood._build_template()``'s bh_ringdown branch (which uses
+    ``A_rd = 10**log10_A``), so the declared parameter vector did not match the
+    likelihood's forward model.
+
+    The ``M`` prior is bounded so that the Kerr QNM frequency stays inside the
+    analysis band for *every* spin in the ``a_star`` prior; see
+    ``_m_prior_bounds_for_band()``.
     """
 
     name = "StandardBHRingdown"
     channel = "gw"
+
+    SPIN_MAX = 0.998
+
+    @staticmethod
+    def _m_prior_bounds_for_band(
+        f_low: float = BAND_LOW_HZ,
+        f_high: float = BAND_HIGH_HZ,
+        spin_max: float = 0.998,
+    ) -> tuple[float, float]:
+        """Widest ``M`` range whose QNM frequency stays inside ``[f_low, f_high]``.
+
+        ``kerr_qnm_frequency`` gives ``f = k(a) / M`` with ``k`` monotonically
+        increasing in spin, so across ``a_star in [0, spin_max]`` the frequency
+        for a given mass spans ``[k(0)/M, k(spin_max)/M]``.  Requiring both ends
+        to stay in band for every spin gives
+        ``M >= k(spin_max)/f_high`` and ``M <= k(0)/f_low``.
+
+        This is deliberately conservative: the bound is set by the worst-case
+        spin, so a lower-spin remnant lighter than the returned minimum would
+        still be in band.  Making the constraint spin-dependent would need a
+        joint ``(M, a_star)`` prior, which the independent-``ParameterSpec``
+        prior machinery does not express.
+        """
+        from ..utils.math_utils import kerr_qnm_frequency
+
+        k_low_spin = kerr_qnm_frequency(1.0, 0.0)[0]        # f at M = 1 Msun, a = 0
+        k_high_spin = kerr_qnm_frequency(1.0, spin_max)[0]  # f at M = 1 Msun, a = spin_max
+        return k_high_spin / f_high, k_low_spin / f_low
 
     def parameters(self) -> list[ParameterSpec]:
         return [
             ParameterSpec(
                 name="M",
                 prior_type="log_uniform",
-                prior_kwargs={"low": 5.0, "high": 1000.0},
+                # [20, 590] sits inside the exact band-derived bounds
+                # [19.13, 594.88] returned by _m_prior_bounds_for_band() at the
+                # configured 20-1700 Hz band, with a small margin.  The old
+                # [5, 1000] range mapped to f_rd in [11.9, 6505] Hz, so 17% of
+                # prior draws were either rejected outright by _build_template()
+                # or landed above the band mask, where the likelihood is blind.
+                prior_kwargs={"low": 20.0, "high": 590.0},
                 unit="M_sun",
-                description="Final BH mass",
+                description="Final BH mass (bounded so f_QNM stays in the analysis band)",
                 latex=r"$M$",
             ),
             ParameterSpec(
                 name="a_star",
                 prior_type="uniform",
-                prior_kwargs={"low": 0.0, "high": 0.998},
+                prior_kwargs={"low": 0.0, "high": self.SPIN_MAX},
                 unit="dimensionless",
                 description="Dimensionless spin",
                 latex=r"$a_*$",
@@ -212,24 +272,8 @@ class StandardBHRingdown(BaseModel):
                 prior_type="uniform",
                 prior_kwargs={"low": -24.0, "high": -18.0},
                 unit="log10(strain)",
-                description="Log10 peak ringdown strain",
+                description="Log10 peak ringdown strain (free amplitude nuisance parameter)",
                 latex=r"$\log_{10} A$",
-            ),
-            ParameterSpec(
-                name="D_L",
-                prior_type="volume_uniform",
-                prior_kwargs={"low": 10.0, "high": 10000.0},
-                unit="Mpc",
-                description="Luminosity distance",
-                latex=r"$D_L$",
-            ),
-            ParameterSpec(
-                name="i",
-                prior_type="cos_uniform",
-                prior_kwargs={},
-                unit="rad",
-                description="Inclination angle",
-                latex=r"$i$",
             ),
         ]
 
@@ -245,7 +289,6 @@ class StandardBHRingdown(BaseModel):
             "delta_f_hz": 0.0,
             "delta_Q": 0.0,
             "A": 10.0 ** params["log10_A"],
-            "D_L_mpc": params["D_L"],
         }
 
 

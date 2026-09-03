@@ -151,10 +151,9 @@ class TestAlternativeModels:
         assert "DM" in magnetar_model.parameter_names
 
     def test_bh_ringdown_eps_zero(self, bh_ringdown_model):
-        params = {
-            "M": 60.0, "a_star": 0.6,
-            "log10_A": -22.0, "D_L": 100.0, "i": 0.3,
-        }
+        # Free-amplitude phenomenological ringdown: M, a_star, log10_A only.
+        # D_L / i were removed because the GW likelihood never read them.
+        params = {"M": 60.0, "a_star": 0.6, "log10_A": -22.0}
         stats = bh_ringdown_model.summary_stats(params)
         assert stats["delta_f_hz"] == 0.0
         assert stats["delta_Q"] == 0.0

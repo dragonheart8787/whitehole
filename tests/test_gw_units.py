@@ -55,7 +55,7 @@ def test_bh_ringdown_uses_log10_A(gw_obs_dict, gw_context_dict):
     data = gw_obs_dict
     ctx = gw_context_dict
     ll = GWLikelihood("bh_ringdown")
-    theta = {"M": 30.0, "a_star": 0.6, "log10_A": -22.0, "D_L": 400.0, "i": 0.5}
+    theta = {"M": 30.0, "a_star": 0.6, "log10_A": -22.0}
     l1 = ll.loglike(theta, data, ctx)
     theta2 = dict(theta)
     theta2["log10_A"] = -20.0
