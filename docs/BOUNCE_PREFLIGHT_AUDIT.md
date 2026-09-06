@@ -9,9 +9,11 @@ SBC/coverage 之前的前置稽核結果。不構成任何白洞訊號偵測或�
 WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是白洞證明器。所有資料皆為
 mock 模擬資料，未使用任何真實 GWOSC 觀測資料。
 
-**Part B 的 SBC/coverage campaign 尚未執行**——前置稽核發現了與
-`docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md` 發現 (B)/(D) 同等級的阻斷性問題，依 fail-closed
-原則先如實回報現況與修法選項，等決策後另開一輪處理，不自行選一個方向就動手改。
+**文件狀態（2026-09-06 更新）**：Part A、Part B 是原始紀錄，內容不變——Part B 的
+campaign 當時未執行，因為前置稽核發現了與 `docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md`
+發現 (B)/(D) 同等級的阻斷性問題，依 fail-closed 原則先回報現況與修法選項。
+決策後的四項修正（B.1／B.3-B3-3／B.4-B4-2／B.5）與修正後的 SBC/coverage 驗證結果見
+**Part C**：六個取樣參數的 SBC rank 均勻性全部通過，`eps_Q` 有一項需要留意的訊號。
 
 ---
 
@@ -280,3 +282,167 @@ f_rd 在先驗上的範圍：[8.97, 6860.64] Hz     （可分析頻帶是 [20, 1
 稽核腳本放在 session scratchpad（不進版控）：`bounce_audit.py`（逐參數活性）、
 `bounce_audit2.py`（爆發時序／天線投影／頻帶覆蓋）、`bounce_audit3.py`（天線不一致造成的
 `D_L` 偏差實測）。本文件中的每個數字都可由這三個腳本重現。
+
+---
+
+# Part C：修正後的 `bounce` GW 通道校準驗證（2026-09-06）
+
+> 本節記錄依 §B.7 決策實作的四項修正（commit `fdf8870`），以及修正後對 `bounce` 執行的
+> SBC/coverage 驗證結果。同樣不含任何天文物理宣稱，只描述 bounce 模型 GW 通道規格對齊與
+> 校準驗證。
+
+## C.1 實作的四項修正
+
+| 對應發現 | 決策 | 檔案 | 改動 |
+|---|---|---|---|
+| **B.1** 結構性 | 取樣維度由 likelihood 決定 | `inference/bilby_runner.py` | 新增 `effective_parameter_names(model, likelihood)`：model 參數順序下與 `likelihood.parameter_names` 的交集；likelihood 未宣告參數時不做限制（維持既有行為）；likelihood 要求 model 沒有的參數時 **raise**。`_restrict_priors()` 套用到 dynesty 的先驗字典，metadata 新增 `sampled_parameters` / `model_parameters` / `likelihood_parameters` |
+| **B.3** | B3-3 | `likelihoods/gw_likelihood.py` | `GWLikelihood("bounce").parameter_names` 8 → **6**（移除 `log10_A_bounce`、`log10_tau_bounce_yr`）；`_build_template()` 爆發分支加註原因（§B.3 數字）並保留分支本身 |
+| **B.4** | B4-2 | `simulators/grav_wave.py` | `A_rd = h0·√(fp²+fc²)` → `A_rd = h0·fp`，`fp = 0.5(1+cos²i)`，與樣板公式及 `ringdown_waveform()` 只回傳 h₊ 一致 |
+| **B.5** | 收窄 M 先驗 | `models/bounce.py` | 新增 `_m_prior_bounds_for_band()`（含 `eps_f` 因子）；`M` 先驗 `log_uniform(5, 1000)` → `log_uniform(25, 415)` |
+
+`BlackToWhiteBounce.parameter_names` 維持 **12 個不變**——`log10_ell_q`、`p_lifetime`、
+`eta_r`、`eta_gamma` 仍宣告在 model 上，只是不進入 GW 通道的取樣維度。
+
+**附帶查證**（依指示實際讀了其他通道的 likelihood，未假設）：這四個參數目前**沒有任何**
+likelihood 讀取。`RadioBurstLikelihood` 用的是 `log10_eta_r`、`XRayBurstLikelihood` 用的是
+`log10_eta_gamma`，兩者都屬於 `PBHTunnelingWhiteHole`，與 bounce 的 `eta_r`／`eta_gamma`
+是不同參數；`VisibilityLikelihood` 也沒有用到其中任何一個。B.1 的交集邏輯是通用的，
+未來若某個通道真的開始使用它們，會自動被納入取樣維度。
+
+### M 先驗界限的重新推導
+
+未照抄稽核報告數字，從程式碼裡的 `kerr_qnm_frequency`、`eps_f` 實際先驗與
+`BAND_LOW_HZ`／`BAND_HIGH_HZ` 重新推導：`f = k(a)/M · (1+eps_f)`，`k` 對自旋單調遞增，
+要讓每組 `(a_star, eps_f)` 都在 `[20, 1700]` Hz 內需要
+
+```
+M >= k(0.998)·(1+0.3)/1700 = 24.872086
+M <= k(0)·(1-0.3)/20       = 416.417493
+```
+
+**重新推導後確認與稽核報告的 `[24.87, 416.42]` 一致。** 採用 `[25, 415]` 留安全邊界。
+這組界限由最壞情況（最高自旋 × `eps_f` 上界）決定，屬於保守值：低自旋或負 `eps_f` 的
+更輕殘骸其實仍在頻帶內，要放寬需要 `(M, a_star, eps_f)` 聯合先驗，現有機制表達不了。
+
+依 §B.7 的決定，**沒有**額外加 `0.8 × f_rd` 的頻帶檢查——爆發參數已不在取樣 theta 裡，
+該分支不會被觸發。
+
+## C.2 執行設定與 provenance
+
+`InjectionRecovery` N=200、`ci_level=0.90`、dynesty `nlive=250`、`likelihood_mode=full`、
+seed=20260906，context 與前幾輪相同。取樣維度 **6**（`M, a_star, eps_f, eps_Q, D_L, i`），
+由 B.1 的交集邏輯決定並記錄在 metadata 裡。總耗時 24207 s（約 6.7 小時）。
+posterior 樣本數 min/median/max = **516 / 777 / 1417**，全部遠高於 rank 分母 L=100。
+median `ln_Z` = −9.63×10¹⁰，median `ln_Z_err` = 449.1 nats（發現 (C) 未處理，見 §C.6）。
+
+**與前幾輪的一項方法差異，如實標註**：這一輪的 rank 是從 `InjectionRecovery` 保留的
+posterior 算出來的，不是由 `SBCRunner` 直接產出。原本兩條 campaign 平行跑（`SBCRunner`
+給 rank、`InjectionRecovery` 給 coverage），但兩者用同一 seed 抽同一批真值、產生同一批 mock
+資料、用同一組 sampler 設定，等於同一件事做兩遍互相搶 CPU；為了縮短總時間砍掉了 `SBCRunner`
+那條。rank 估計量（`utils.math_utils.compute_sbc_rank`）、thinning 規則
+（`default_rng(seed + i).choice(n, size=min(L, n), replace=False)`）與均勻性判定
+（`SBCResult` 的確定性 `kstest`）都與 `SBCRunner` 完全相同，而且 rank 與 coverage 現在
+來自同一批 200 組抽樣，比兩條獨立 stream 更一致。
+
+（順帶記錄一個被推翻的假設：原本以為兩條 stream 會給出逐位元相同的結果，實測**不是**——
+同 index 的 posterior 樣本數不同、中位數最大差到 63%。`bilby.run_sampler(seed=...)` 在兩個
+全域 RNG 使用歷史不同的進程裡並未完全決定化。所以兩者是獨立實現，只能擇一，不能互相推導。）
+
+## C.3 SBC rank statistics
+
+L=100，rank ∈ {0,…,100}；`kstest p` 是 `SBCResult` 的確定性單樣本檢定，
+`χ² p` 是 20 個等寬 bin 的適合度檢定。
+
+| 參數 | rank 平均（期望 50.0） | rank 標準差（期望 29.15） | frac rank=0 | frac rank=L | **kstest p** | χ² p |
+|---|---|---|---|---|---|---|
+| `M` | 46.56 | 28.60 | 0.015 | 0.025 | **0.100** | 0.924 |
+| `a_star` | 48.76 | 30.58 | 0.010 | 0.025 | **0.412** | **0.018** |
+| `eps_f` | 46.30 | 30.43 | 0.010 | 0.010 | **0.058** | 0.590 |
+| `eps_Q` | 48.27 | 30.07 | 0.015 | 0.005 | **0.186** | **0.008** |
+| `D_L` | 47.76 | 29.46 | 0.005 | 0.015 | **0.580** | 0.748 |
+| `i` | 51.22 | 29.75 | 0.005 | 0.020 | **0.469** | 0.509 |
+
+Rank 直方圖（20 bins，N=200，均勻期望每格 10）：
+
+```
+M        12 10 13 13 10 10  8 13 12 15  9  9  7  8 11  6 10  7  9  8
+a_star   20  9 11 10  6  6 11 10 14 12  3  7  6 14 15 12  6  7  6 15
+eps_f    16 13 12 11 12  7 15 10 10  7  9  8  6  8 10 11  4  9 13  9
+eps_Q    17 15 10  7  8  3  8 20  8 12  8  6 12  7 11  8  6 15 14  5
+D_L      14 12  8 15 10  7 11 13  9  6  8 16  7  9  8 10 11  9  9  8
+i        12 14 10 12  5  5  9 10  8  6 12 12 12  9 15 12  6  6 12 13
+```
+
+**六個參數的 KS 均勻性檢定全部通過（p > 0.05）**，沒有任何一個出現前幾輪那種
+端點堆積（最大的 `frac_rank_0` / `frac_rank_L` 都 ≤ 0.025，均勻期望值是 0.0099）。
+
+但 `a_star`（χ² p = 0.018）與 `eps_Q`（χ² p = 0.008）在 20-bin 適合度檢定上偏離：
+KS 對 CDF 層級的位移敏感、χ² 對局部起伏敏感，兩者不一致代表這兩個參數的 rank 分布
+在中段有結塊（`eps_Q` 的第 8 個 bin 有 20 個、第 6 個 bin 只有 3 個）而不是整體位移。
+**多重比較的處理**：本節共做了 12 個檢定（6 KS + 6 χ²），Bonferroni 的 5% 門檻是
+p = 0.0042，**這兩個值都在門檻之上**，所以在校正多重比較之後不構成統計顯著的不校準。
+
+## C.4 Credible interval coverage
+
+括號內為偏離名目值的倍數（以二項式標準誤計）。
+
+| 參數 | 名目 50% | 名目 68% | 名目 90% |
+|---|---|---|---|
+| `M` | 0.490 (−0.28σ) | 0.685 (+0.15σ) | **0.905** (+0.24σ) |
+| `a_star` | 0.490 (−0.28σ) | 0.645 (−1.03σ) | 0.855 (−1.81σ) |
+| `eps_f` | 0.470 (−0.85σ) | 0.630 (−1.46σ) | 0.895 (−0.23σ) |
+| `eps_Q` | 0.485 (−0.42σ) | **0.590 (−2.59σ)** | 0.885 (−0.67σ) |
+| `D_L` | 0.510 (+0.28σ) | 0.665 (−0.45σ) | **0.905** (+0.24σ) |
+| `i` | 0.520 (+0.57σ) | 0.675 (−0.15σ) | 0.875 (−1.07σ) |
+
+18 個數字中 17 個落在名目值的 1.9σ 以內。**唯一的例外是 `eps_Q` 在 68% 名目下的
+0.590（−2.59σ）**，見 §C.5。`calibration_report.py::_evaluate_coverage` 的 PASS 條件
+（`0.8 ≤ cov90 ≤ 1.0`）六個參數全部通過。
+
+## C.5 一句話結論
+
+**修正 B.1／B.3／B.4／B.5 之後，`bounce` 模型在 GW 通道的 6 個取樣參數
+（`M, a_star, eps_f, eps_Q, D_L, i`）SBC rank 均勻性全部通過（kstest p = 0.100 / 0.412 /
+0.058 / 0.186 / 0.580 / 0.469），90% coverage 全部落在 0.855–0.905、18 個 coverage 數字中
+17 個在 1.9σ 以內；唯一需要留意的是 `eps_Q` 在 68% 名目下實測 0.590（−2.59σ），
+以及 `a_star`／`eps_Q` 的 20-bin χ² 檢定分別為 0.018／0.008（校正 12 個檢定的多重比較後
+不顯著）——這三個訊號一致地指向 `eps_Q`，如實回報，未做任何進一步修正。**
+
+### `D_L` 的對比：從「乾淨正對照組」變成真正的檢驗
+
+上一輪 `bh_ringdown` 的 `D_L` 完全不進 likelihood，posterior 就是 prior，所以它校準完美
+只證明了 SBC 工具鏈本身沒問題，對模型是否對齊沒有任何說服力。
+
+這一輪不同：bounce 的 `D_L` 透過 `h0 = GM/(c²D_L)` **真正進入 likelihood**，而且它正是
+B.4 天線不一致最直接的受害者——修正前的實測是「真值 100 Mpc，最大似然落在 70.83 Mpc」，
+偏差倍數 1.4118 與天線比值 1.4142 吻合到三位有效數字。
+
+修正後 `D_L` 的結果是 **kstest p = 0.580、χ² p = 0.748、coverage 0.510 / 0.665 / 0.905
+（+0.28σ / −0.45σ / +0.24σ）**，是六個參數裡最乾淨的一個。這是 B4-2（模擬器改成只注入
+plus 極化）確實把模擬器與樣板對齊了的直接證據——如果天線公式仍然不一致，
+`D_L` 的 posterior 會系統性偏低、rank 會往上界堆積，而實測 `frac_rank_L` 只有 0.015。
+
+## C.6 仍然成立、未在本輪處理的事項
+
+1. **發現 (C)（第五輪 taper 在 mock 路徑失效）依舊未處理**：本輪 median `ln_Z_err` 是
+   **449.1 nats**。如 `BH_RINGDOWN_SBC_COVERAGE_REPORT.md` §6(C) 所述，這不影響 posterior
+   的校準（本節數字就是證據），但 evidence 的精度在 mock 上仍然是壞的。
+2. **`eps_Q` 的 68% under-coverage 與 χ² 結塊**（§C.4、§C.5）——如實回報，未動手。
+3. **爆發成分在 GW 通道仍未實作**（B3-3 的定義就是如此）。要在 GW 通道推論爆發，需要先做
+   B3-2 的重新參數化（把「相對 merger 的延遲」與「宇宙學壽命」分開）。目前 GW 通道的
+   `bounce` 與 `bh_ringdown` 的差別只有 `eps_f`／`eps_Q` 兩個 ringdown 偏移量。
+4. **`M` 先驗界限的保守性**（§C.1）：需要聯合先驗才能放寬。
+5. **`InjectionRecoveryResult._compute_coverage` 對 posterior 裡不存在的參數會退回
+   `(-inf, +inf)`**，也就是**無條件算作被覆蓋**。本輪因為分析只取 6 個取樣參數而未受影響，
+   但這是一個會靜默給出 coverage = 1.0 的預設值，與 fail-closed 原則相衝突。
+   本輪未修，如實記錄。
+6. **N=200 的檢定力限制**：`SBCRunner` docstring 建議 N ≥ 1000。
+
+## C.7 第三輪產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `docs/calibration/bounce_sbc_rank_statistics.csv` | 6 個參數的 rank 統計、kstest／χ² p 值、三個層級的 coverage | 是 |
+| `docs/calibration/bounce_coverage.csv` | 50%/68%/90% coverage 與二項式標準誤 | 是 |
+| `docs/calibration/bounce_coverage_90_native.csv` | `InjectionRecoveryResult.summary()` 原生輸出 | 是 |
+| `artifacts/calibration/bounce_sbc/rank_hist_*.png`, `ranks.json`, `theta_true.csv`, `evidences.csv`, `meta.json` | rank 直方圖與每次注入的 provenance | 否（`artifacts/` 在 `.gitignore` 內） |
