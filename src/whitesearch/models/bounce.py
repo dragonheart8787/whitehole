@@ -15,6 +15,9 @@ from __future__ import annotations
 import numpy as np
 
 from .base import BaseModel, ParameterSpec
+# Single source of truth for the GW analysis band (from
+# configs/instruments/ligo.yaml preprocessing.{low,high}_freq_cutoff).
+from .alternatives import BAND_HIGH_HZ, BAND_LOW_HZ
 from ..utils.constants import (
     G, C, M_SUN, MPC_M, GYR_S,
     F_QNM_SCHW, T_QNM_SCHW, Q_QNM_SCHW,
@@ -33,20 +36,72 @@ class BlackToWhiteBounce(BaseModel):
     name = "BlackToWhiteBounce"
     channel = "gw"
 
+    SPIN_MAX = 0.998
+    EPS_F_RANGE = (-0.3, 0.3)
+
+    @classmethod
+    def _m_prior_bounds_for_band(
+        cls,
+        f_low: float = BAND_LOW_HZ,
+        f_high: float = BAND_HIGH_HZ,
+    ) -> tuple[float, float]:
+        """Widest ``M`` range whose ringdown frequency stays inside the band.
+
+        ``kerr_qnm_frequency`` gives ``f = k(a) / M`` with ``k`` monotonically
+        increasing in spin, and the bounce model multiplies it by
+        ``(1 + eps_f)``.  Across ``a_star in [0, SPIN_MAX]`` and
+        ``eps_f in EPS_F_RANGE`` the frequency for a given mass therefore spans
+        ``[k(0)(1+eps_f_min)/M, k(SPIN_MAX)(1+eps_f_max)/M]``.  Requiring both
+        ends to stay in band for every ``(a_star, eps_f)`` gives
+
+            M >= k(SPIN_MAX) * (1 + eps_f_max) / f_high
+            M <= k(0)        * (1 + eps_f_min) / f_low
+
+        Same construction as ``StandardBHRingdown._m_prior_bounds_for_band()``,
+        with the extra ``eps_f`` factor bounce applies to the GR frequency.
+
+        Deliberately conservative: the bounds are set by the worst-case
+        ``(spin, eps_f)`` corner, so a lower-spin or negative-``eps_f`` remnant
+        lighter than the returned minimum would still be in band.  Making the
+        constraint joint would need a joint ``(M, a_star, eps_f)`` prior, which
+        the independent-``ParameterSpec`` machinery cannot express.
+        """
+        f_at_unit_mass_low_spin = kerr_qnm_frequency(1.0, 0.0)[0]
+        f_at_unit_mass_high_spin = kerr_qnm_frequency(1.0, cls.SPIN_MAX)[0]
+        eps_f_min, eps_f_max = cls.EPS_F_RANGE
+        return (
+            f_at_unit_mass_high_spin * (1.0 + eps_f_max) / f_high,
+            f_at_unit_mass_low_spin * (1.0 + eps_f_min) / f_low,
+        )
+
     def parameters(self) -> list[ParameterSpec]:
         return [
             ParameterSpec(
                 name="M",
                 prior_type="log_uniform",
-                prior_kwargs={"low": 5.0, "high": 1000.0},
+                # [25, 415] sits inside the exact band-derived bounds
+                # [24.872086, 416.417493] from _m_prior_bounds_for_band() at
+                # the configured 20-1700 Hz band, with a small margin.  These
+                # are the conservative bounds set by the highest spin combined
+                # with the eps_f upper bound (and the lowest spin with the
+                # eps_f lower bound at the top end).  The old [5, 1000] range
+                # mapped to f_rd in [8.97, 6860.64] Hz, so 14.06% of prior
+                # draws were rejected outright by
+                # GWLikelihood._build_template() and 16.46% fell outside the
+                # band mask, where the likelihood is blind.  See
+                # docs/BOUNCE_PREFLIGHT_AUDIT.md section B.5.
+                prior_kwargs={"low": 25.0, "high": 415.0},
                 unit="M_sun",
-                description="Initial black hole mass at merger",
+                description=(
+                    "Initial black hole mass at merger "
+                    "(bounded so f_QNM*(1+eps_f) stays in the analysis band)"
+                ),
                 latex=r"$M$",
             ),
             ParameterSpec(
                 name="a_star",
                 prior_type="uniform",
-                prior_kwargs={"low": 0.0, "high": 0.998},
+                prior_kwargs={"low": 0.0, "high": self.SPIN_MAX},
                 unit="dimensionless",
                 description="Final BH dimensionless spin",
                 latex=r"$a_*$",
@@ -78,7 +133,7 @@ class BlackToWhiteBounce(BaseModel):
             ParameterSpec(
                 name="eps_f",
                 prior_type="uniform",
-                prior_kwargs={"low": -0.3, "high": 0.3},
+                prior_kwargs={"low": self.EPS_F_RANGE[0], "high": self.EPS_F_RANGE[1]},
                 unit="dimensionless",
                 description="Fractional shift in ringdown frequency from GR: f = f_GR * (1 + ε_f)",
                 latex=r"$\varepsilon_f$",

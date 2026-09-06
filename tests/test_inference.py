@@ -105,8 +105,12 @@ class TestBilbyRunner:
         ll = GWLikelihood()
 
         result = runner.run(ll, gw_sim_data, gw_context, model, label="test_cols")
-        for param in model.parameter_names:
-            assert param in result.posterior.columns
+        # The sampled space is the model/likelihood intersection, not the whole
+        # model: BlackToWhiteBounce declares 12 parameters, GWLikelihood
+        # ("bounce") reads 6.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.1.
+        expected = BilbyRunner.effective_parameter_names(model, ll)
+        assert expected == ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
+        assert list(result.posterior.columns) == expected
 
     def test_compare_models_returns_dataframe(
         self, bounce_params, gw_context, gw_sim_data, tmp_path
@@ -214,9 +218,13 @@ class TestBayesFactor:
         model = BlackToWhiteBounce()
         null_model = StandardBHRingdown()
         ll = GWLikelihood()
+        # Each model must be paired with its own likelihood: a bounce
+        # likelihood on a bh_ringdown model is now rejected outright, because
+        # it asks for eps_f/eps_Q/D_L/i that model does not declare.
+        ll_null = GWLikelihood("bh_ringdown")
 
         r_wh = runner.run(ll, gw_sim_data, gw_context, model, label="wh")
-        r_null = runner.run(ll, gw_sim_data, gw_context, null_model, label="null")
+        r_null = runner.run(ll_null, gw_sim_data, gw_context, null_model, label="null")
 
         result = compute_bayes_factor(
             {"bounce": r_wh, "null": r_null},

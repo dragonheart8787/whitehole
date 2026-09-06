@@ -61,11 +61,10 @@ class GWLikelihood(BaseLikelihood):
         if self.model_name == "null":
             return []
         if self.model_name == "bounce":
-            return [
-                "M", "a_star", "eps_f", "eps_Q",
-                "log10_A_bounce", "log10_tau_bounce_yr",
-                "D_L", "i",
-            ]
+            # log10_A_bounce and log10_tau_bounce_yr are deliberately absent:
+            # the GW channel does not infer the bounce burst.  See the note on
+            # _build_template() below.
+            return ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
         # bh_ringdown (and any other non-bounce GW model routed here) is a
         # phenomenological ringdown: the template amplitude is the free
         # log10_A used by _build_template() below.  D_L and i used to be
@@ -216,6 +215,24 @@ class GWLikelihood(BaseLikelihood):
         h = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)
 
         if self.model_name == "bounce":
+            # The GW channel does not infer the bounce burst, so this branch is
+            # unreachable for parameters drawn from the sampler: log10_A_bounce
+            # and log10_tau_bounce_yr are not in
+            # GWLikelihood("bounce").parameter_names.
+            #
+            # Why: log10_tau_bounce_yr is a cosmological BH lifetime in YEARS
+            # with prior U(-3, 10), i.e. tau in [3.156e+04, 3.156e+17] s.  The
+            # burst is only inside the analysed strain when
+            # t_merger + tau < duration, which needs log10_tau_yr < -6.90 for a
+            # 4 s segment (-5.99 for 32 s).  Prior mass satisfying that is
+            # 0.0000 -- no prior draw ever puts the burst in the segment.  See
+            # docs/BOUNCE_PREFLIGHT_AUDIT.md section B.3 for the measurements.
+            #
+            # The branch is kept (not deleted) so a caller passing an explicit
+            # theta can still evaluate a burst template.  Inferring the burst
+            # in the GW channel first needs the burst delay re-parameterised
+            # relative to the merger rather than as a cosmological lifetime
+            # (audit option B3-2); that is a model-design change, not this one.
             if "log10_A_bounce" in theta and "log10_tau_bounce_yr" in theta:
                 A_b = float(10.0 ** theta["log10_A_bounce"])
                 from ..utils.constants import GYR_S

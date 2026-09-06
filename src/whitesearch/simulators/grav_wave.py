@@ -182,8 +182,16 @@ class GravitationalWaveSimulator(BaseSimulator):
             i = params.get("i", 0.0)
             D_L_m = params.get("D_L", 100.0) * 3.086e22
             h0 = float(G * M * M_SUN / (C**2 * D_L_m))
-            fp, fc = antenna_response(i)
-            A_rd = h0 * np.sqrt(fp**2 + fc**2)
+            # Plus polarisation only, matching
+            # GWLikelihood._build_template()'s A_rd = h0 * 0.5*(1 + cos^2 i)
+            # and matching ringdown_waveform(), whose docstring states it
+            # returns h_+ .  This previously used sqrt(fp^2 + fc^2), mixing the
+            # plus and cross amplitudes into a single real template: the
+            # injected amplitude was up to sqrt(2) = 1.4142 times what the
+            # likelihood modelled (face-on), which biased the recovered D_L by
+            # the same factor.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.4.
+            fp, _fc = antenna_response(i)
+            A_rd = h0 * fp
 
         # ── Build signal ───────────────────────────────────────────────────────
         h_plus = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)

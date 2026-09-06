@@ -170,7 +170,9 @@ class BilbyRunner:
         model : BaseModel (supplies bilby priors)
         label : str — unique label for this run
         """
-        if not model.parameter_names:
+        sampled_names = self.effective_parameter_names(model, likelihood)
+
+        if not sampled_names:
             return self._analytic_zero_parameter_evidence(
                 likelihood, data, context, model, label=label
             )
@@ -180,13 +182,16 @@ class BilbyRunner:
                 logger.warning("Using toy sampler (force_toy=True).")
             else:
                 logger.warning("Using toy sampler (bilby not installed).")
-            return self._toy_sampler(likelihood, data, context, model, label=label)
+            return self._toy_sampler(
+                likelihood, data, context, model, label=label,
+                sampled_names=sampled_names,
+            )
 
         t0 = time.time()
         self.outdir.mkdir(parents=True, exist_ok=True)
 
         bilby_likelihood = self._wrap_likelihood(likelihood, data, context)
-        priors = model.to_bilby_priors()
+        priors = self._restrict_priors(model.to_bilby_priors(), sampled_names)
 
         logger.info(
             "Running bilby/%s with %d live points for model=%s label=%s",
@@ -228,6 +233,9 @@ class BilbyRunner:
             "sampler_kwargs": actual_kwargs,
             "requested_sampler_kwargs": requested_kwargs,
             "bound_fallback_occurred": bound_fallback is not None,
+            "sampled_parameters": list(sampled_names),
+            "model_parameters": list(model.parameter_names),
+            "likelihood_parameters": list(likelihood.parameter_names),
         }
         if bound_fallback is not None:
             metadata["bound_fallback_from"] = bound_fallback[0]
@@ -240,6 +248,61 @@ class BilbyRunner:
             log_likelihood_samples=ll_samples,
             metadata=metadata,
         )
+
+    @staticmethod
+    def effective_parameter_names(
+        model: BaseModel,
+        likelihood: BaseLikelihood,
+    ) -> list[str]:
+        """Parameters this run should actually sample.
+
+        The dimension of the sampled space belongs to the likelihood, not to
+        the model: a model may declare parameters that a given channel's
+        likelihood never reads.  ``BlackToWhiteBounce`` declares 12 (its
+        quantum-scale, lifetime-exponent and radio/gamma efficiency parameters
+        included) while ``GWLikelihood("bounce")`` reads 6, so building priors
+        from the model alone made dynesty explore 6 dead dimensions and
+        misreported the dimensionality of every calibration result.  See
+        docs/BOUNCE_PREFLIGHT_AUDIT.md section B.1.
+
+        Returns the model's parameters in model order, restricted to those the
+        likelihood declares.  A likelihood that declares no parameters imposes
+        no restriction (the previous behaviour), so channels whose likelihood
+        genuinely consumes the whole model parameter vector are unaffected.
+
+        Raises
+        ------
+        ValueError
+            If the likelihood declares a parameter the model does not provide.
+            That is a specification mismatch, not something to paper over with
+            a default value -- fail closed.
+        """
+        model_names = list(model.parameter_names)
+        wanted = list(likelihood.parameter_names)
+        if not wanted:
+            return model_names
+
+        missing = [p for p in wanted if p not in model_names]
+        if missing:
+            raise ValueError(
+                f"Likelihood {type(likelihood).__name__} requires parameter(s) "
+                f"{missing} that model {model.name!r} does not declare "
+                f"(model provides {model_names})."
+            )
+        return [p for p in model_names if p in wanted]
+
+    @staticmethod
+    def _restrict_priors(priors: Any, sampled_names: list[str]) -> Any:
+        """Drop prior entries for parameters this run does not sample."""
+        if set(priors) == set(sampled_names):
+            return priors
+        dropped = [p for p in priors if p not in sampled_names]
+        logger.info(
+            "Restricting priors to the likelihood's parameters; dropping %s",
+            dropped,
+        )
+        restricted = type(priors)({p: priors[p] for p in sampled_names})
+        return restricted
 
     def _run_dynesty(
         self,
@@ -395,10 +458,19 @@ class BilbyRunner:
         model: BaseModel,
         label: str = "whitesearch",
         n_samples: int = 2000,
+        sampled_names: list[str] | None = None,
     ) -> InferenceResult:
         """Importance-sampling approximation when bilby is unavailable."""
         rng = np.random.default_rng(self.seed)
-        param_names = model.parameter_names
+        # Same restriction as the dynesty path: the calibrate CLI's "quick"
+        # profile runs with force_toy=True, so leaving the toy path
+        # unrestricted would keep reporting dead dimensions in exactly the
+        # reports this fix is meant to correct.
+        param_names = (
+            list(sampled_names)
+            if sampled_names is not None
+            else self.effective_parameter_names(model, likelihood)
+        )
         samples = []
         log_weights = []
 
@@ -421,7 +493,7 @@ class BilbyRunner:
 
         # Weighted posterior samples
         idx = rng.choice(n_samples, size=min(1000, n_samples), replace=True, p=weights)
-        posterior_rows = [samples[i] for i in idx]
+        posterior_rows = [{p: samples[i][p] for p in param_names} for i in idx]
         if param_names:
             posterior = pd.DataFrame(posterior_rows, columns=param_names)
         else:
@@ -438,5 +510,8 @@ class BilbyRunner:
                 "n_prior_samples": n_samples,
                 "label": label,
                 "seed": self.seed,
+                "sampled_parameters": list(param_names),
+                "model_parameters": list(model.parameter_names),
+                "likelihood_parameters": list(likelihood.parameter_names),
             },
         )
