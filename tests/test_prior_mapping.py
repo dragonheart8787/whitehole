@@ -5,7 +5,9 @@ SBC run (docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md, finding (A)): ``cos_uniform``
 drew arccos(U(-1,1)) on [0, pi] but was translated to bilby's ``Cosine``, which
 lives on [-pi/2, +pi/2] with a different density, so half the SBC truths fell
 outside the sampler's support.  ``half_normal`` and ``beta`` had no case at all
-and fell through to ``Uniform(0, 1)``.
+and fell through to ``Uniform(0, 1)``.  ``discrete_uniform`` returned
+``DeltaFunction(values[0])``, pinning bounce's ``p_lifetime`` to 4 instead of
+sampling {4, 5}; it now maps to ``bilby.core.prior.DiscreteValues``.
 
 The parametrised test below covers *every* prior type in the ``PriorType``
 Literal, so a newly added type cannot be introduced with a wrong (or missing)
@@ -54,30 +56,7 @@ def _spec(prior_type: str) -> ParameterSpec:
     )
 
 
-@pytest.mark.parametrize(
-    "prior_type",
-    [
-        pytest.param(
-            "discrete_uniform",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "KNOWN MISMATCH: sample() draws uniformly from `values`, but "
-                    "to_bilby_prior() returns DeltaFunction(values[0]), pinning the "
-                    "sampler to a single value. bilby 2.8's Categorical only covers "
-                    "0..n-1, so an offset set such as bounce's p_lifetime=[4, 5] has "
-                    "no faithful equivalent; raising instead would take bounce's "
-                    "dynesty path offline. Left as an explicit decision -- if this "
-                    "xfail starts passing, the mapping was fixed and this marker "
-                    "should be removed."
-                ),
-            ),
-        )
-        if pt == "discrete_uniform"
-        else pt
-        for pt in SPECS
-    ],
-)
+@pytest.mark.parametrize("prior_type", list(SPECS))
 def test_bilby_prior_matches_sample_prior(prior_type):
     """Empirical distributions from both code paths must be indistinguishable."""
     spec = _spec(prior_type)
@@ -91,10 +70,21 @@ def test_bilby_prior_matches_sample_prior(prior_type):
     assert np.isfinite(ours).all()
     assert np.isfinite(theirs).all()
 
-    _, pvalue = stats.ks_2samp(ours, theirs)
+    if prior_type == "discrete_uniform":
+        # KS is the wrong instrument for a finite support: compare the value
+        # sets and their frequencies with a chi-square test instead.
+        expected = sorted(float(v) for v in SPECS[prior_type]["values"])
+        assert sorted(np.unique(ours).tolist()) == expected
+        assert sorted(np.unique(theirs).tolist()) == expected
+        observed = np.array([(theirs == v).sum() for v in expected], dtype=float)
+        expected_counts = np.array([(ours == v).sum() for v in expected], dtype=float)
+        _, pvalue = stats.chisquare(observed, f_exp=expected_counts)
+    else:
+        _, pvalue = stats.ks_2samp(ours, theirs)
+
     assert pvalue > KS_P_MIN, (
         f"{prior_type}: sample_prior and bilby prior disagree "
-        f"(KS p={pvalue:.3g}); ours [{ours.min():.4g}, {ours.max():.4g}] "
+        f"(p={pvalue:.3g}); ours [{ours.min():.4g}, {ours.max():.4g}] "
         f"vs bilby [{theirs.min():.4g}, {theirs.max():.4g}]"
     )
 
@@ -122,3 +112,41 @@ def test_every_model_builds_bilby_priors():
         model = get_model(name)
         priors = model.to_bilby_priors()
         assert set(priors) == set(model.parameter_names), name
+
+
+@pytest.mark.parametrize("values", [[4, 5], [2, 7, 11], [-3, 0, 1, 9]])
+def test_discrete_uniform_covers_arbitrary_offset_value_sets(values):
+    """Not just {0..n-1}, and not just two values."""
+    spec = ParameterSpec(
+        name="discrete", prior_type="discrete_uniform", prior_kwargs={"values": values}
+    )
+    prior = spec.to_bilby_prior()
+    np.random.seed(20260906)
+    drawn = np.asarray(prior.sample(40_000), dtype=float)
+    assert sorted(np.unique(drawn).tolist()) == sorted(float(v) for v in values)
+    counts = np.array([(drawn == v).sum() for v in values], dtype=float)
+    _, pvalue = stats.chisquare(counts)
+    assert pvalue > KS_P_MIN, f"{values}: not uniform over the value set (p={pvalue:.3g})"
+    # The prior must also score the values it claims to support, so nested
+    # sampling sees a real density rather than a point mass.
+    for v in values:
+        assert prior.prob(v) == pytest.approx(1.0 / len(values))
+    assert prior.prob(max(values) + 1) == 0.0
+
+
+def test_discrete_uniform_is_not_a_point_mass():
+    """Regression: this used to be DeltaFunction(values[0])."""
+    prior = ParameterSpec(
+        name="p_lifetime", prior_type="discrete_uniform", prior_kwargs={"values": [4, 5]}
+    ).to_bilby_prior()
+    assert type(prior).__name__ != "DeltaFunction"
+    np.random.seed(0)
+    assert len(np.unique(prior.sample(2_000))) == 2
+
+
+def test_empty_discrete_uniform_raises():
+    spec = ParameterSpec(
+        name="empty", prior_type="discrete_uniform", prior_kwargs={"values": []}
+    )
+    with pytest.raises(ValueError, match="no values"):
+        spec.to_bilby_prior()

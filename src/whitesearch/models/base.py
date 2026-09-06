@@ -205,19 +205,34 @@ class ParameterSpec:
                     unit=self.unit,
                 )
             case "discrete_uniform":
-                # KNOWN MISMATCH, deliberately left in place and covered by
-                # an xfail(strict=True) case in
-                # tests/test_prior_mapping.py::test_bilby_prior_matches_sample_prior.
-                # ``sample()`` draws uniformly from ``values``; DeltaFunction
-                # pins the sampler to values[0].  bilby 2.8's Categorical only
-                # covers 0..n-1, so an offset set such as bounce's
-                # p_lifetime = [4, 5] has no faithful bilby equivalent here.
-                # Raising instead would take bounce's dynesty path offline,
-                # so the fix (re-parameterise, or add a prior class) is left
-                # as an explicit decision rather than made silently.
-                return bp.DeltaFunction(
-                    peak=self.prior_kwargs["values"][0],
+                # bilby.core.prior.DiscreteValues is uniform over an arbitrary
+                # finite value set -- exactly what sample() does above -- and
+                # carries the matching prob / ln_prob / rescale, so no
+                # index<->value shim is needed in the model or likelihood layer.
+                #
+                # This previously returned DeltaFunction(values[0]), which
+                # silently pinned bounce's p_lifetime to 4 instead of sampling
+                # {4, 5}: under dynesty the parameter was never inferred at all.
+                values = list(self.prior_kwargs["values"])
+                if not values:
+                    raise ValueError(
+                        f"discrete_uniform prior for {self.name!r} has no values."
+                    )
+                discrete_values = getattr(bp, "DiscreteValues", None)
+                if discrete_values is None:
+                    # fail-closed on a bilby too old to express this prior,
+                    # rather than substituting a distribution nobody asked for.
+                    raise ImportError(
+                        "This bilby has no DiscreteValues prior, so "
+                        f"discrete_uniform (parameter {self.name!r}) cannot be "
+                        "translated faithfully. Upgrade bilby or add an "
+                        "explicit mapping."
+                    )
+                return discrete_values(
+                    values=values,
                     name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
                 )
             case _:
                 # fail-closed: never silently substitute Uniform(0, 1) for a

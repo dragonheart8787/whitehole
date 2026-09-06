@@ -438,14 +438,18 @@ SBC rank 均勻性（KS p = 0.813 / 0.133 / 0.421，全部 > 0.05）與 credible
    （第一輪是 533.8 nats；差異來自參數數量與先驗範圍改變，不是 (C) 有任何改善）。
    如 §6(C) 所述，這**不影響 posterior 的校準**（本節數字就是證據），但 evidence 的精度
    在 mock 上仍然是壞的——而 evidence 正是排序引擎的核心輸出。
-2. **`discrete_uniform` 的 bilby 映射同樣是錯的，本輪刻意未修**。`ParameterSpec.sample()`
-   從 `values` 均勻抽樣，`to_bilby_prior()` 卻回傳 `DeltaFunction(values[0])`——等於把
-   `bounce` 的 `p_lifetime`（`values=[4, 5]`）在 dynesty 裡釘死在 4。這與 (A) 是同一個
-   bug 家族，但 bilby 2.8 的 `Categorical` 只涵蓋 `0..n-1`，對 `[4, 5]` 這種偏移集合沒有
-   等價類別；改成 raise 會直接讓 bounce 的 dynesty 路徑停擺，超出本輪範圍。
-   目前的處置：程式碼裡標成 `KNOWN MISMATCH`，並在
-   `tests/test_prior_mapping.py::test_bilby_prior_matches_sample_prior` 以
-   `xfail(strict=True)` 鎖住（若有人修好而未移除 marker，測試會轉紅）。**待決策**。
+2. ~~**`discrete_uniform` 的 bilby 映射同樣是錯的，本輪刻意未修**~~
+   **（已於 2026-09-06 修正，見 `docs/BOUNCE_PREFLIGHT_AUDIT.md` §Part A）**。
+   `ParameterSpec.sample()` 從 `values` 均勻抽樣，`to_bilby_prior()` 卻回傳
+   `DeltaFunction(values[0])`——等於把 `bounce` 的 `p_lifetime`（`values=[4, 5]`）在
+   dynesty 裡釘死在 4。這與 (A) 是同一個 bug 家族。
+
+   **本節原本寫的「bilby 2.8 的 `Categorical` 只涵蓋 `0..n-1`，對 `[4, 5]` 這種偏移集合
+   沒有等價類別」是錯的，在此更正。** 當時只查了幾個猜到的類別名稱就斷言不存在，沒有列舉
+   `bilby.core.prior` 的內容。實際上 bilby 2.8.2 就有
+   `bilby.core.prior.DiscreteValues(values=[...])`，語意正好是「在任意有限值集合上均勻」，
+   且 `prob` / `ln_prob` / `rescale` 都正確。修正就是直接改用它，不需要 index↔value 轉換層，
+   也不需要自訂 prior 類別。
 3. **`M` 先驗下界的保守性**（見 §10.1）：需要 `(M, a_star)` 聯合先驗才能放寬。
 4. **N=200 的檢定力限制**：`SBCRunner` docstring 建議 N ≥ 1000。`a_star` 的 p = 0.133
    只能說「沒有證據顯示不校準」，不能宣稱已排除小幅偏差。
@@ -456,7 +460,8 @@ SBC rank 均勻性（KS p = 0.813 / 0.133 / 0.421，全部 > 0.05）與 credible
 
 `pytest`：**147 passed, 1 skipped, 1 deselected, 1 xfailed**
 （第一輪基準 121 passed, 1 skipped, 1 deselected；新增 26 個通過 + 1 個刻意的
-`discrete_uniform` xfail，無非預期 regression）。
+`discrete_uniform` xfail，無非預期 regression）。該 xfail 已於 2026-09-06 隨
+`discrete_uniform` 映射修正而移除。
 
 新增測試檔：
 
