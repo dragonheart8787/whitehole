@@ -432,10 +432,10 @@ plus 極化）確實把模擬器與樣板對齊了的直接證據——如果天
    B3-2 的重新參數化（把「相對 merger 的延遲」與「宇宙學壽命」分開）。目前 GW 通道的
    `bounce` 與 `bh_ringdown` 的差別只有 `eps_f`／`eps_Q` 兩個 ringdown 偏移量。
 4. **`M` 先驗界限的保守性**（§C.1）：需要聯合先驗才能放寬。
-5. **`InjectionRecoveryResult._compute_coverage` 對 posterior 裡不存在的參數會退回
-   `(-inf, +inf)`**，也就是**無條件算作被覆蓋**。本輪因為分析只取 6 個取樣參數而未受影響，
-   但這是一個會靜默給出 coverage = 1.0 的預設值，與 fail-closed 原則相衝突。
-   本輪未修，如實記錄。
+5. ~~**`InjectionRecoveryResult._compute_coverage` 對 posterior 裡不存在的參數會退回
+   `(-inf, +inf)`**~~ **（已於 2026-09-07 修正，見 §C.8）**。舊行為是**無條件算作被覆蓋**
+   （coverage = 1.0）且無任何警告。Part C 的分析因為只取 6 個取樣參數而未受影響，
+   但這是一個與 fail-closed 原則相衝突的靜默預設值。
 6. **N=200 的檢定力限制**：`SBCRunner` docstring 建議 N ≥ 1000。
 
 ## C.7 第三輪產出檔案
@@ -446,3 +446,60 @@ plus 極化）確實把模擬器與樣板對齊了的直接證據——如果天
 | `docs/calibration/bounce_coverage.csv` | 50%/68%/90% coverage 與二項式標準誤 | 是 |
 | `docs/calibration/bounce_coverage_90_native.csv` | `InjectionRecoveryResult.summary()` 原生輸出 | 是 |
 | `artifacts/calibration/bounce_sbc/rank_hist_*.png`, `ranks.json`, `theta_true.csv`, `evidences.csv`, `meta.json` | rank 直方圖與每次注入的 provenance | 否（`artifacts/` 在 `.gitignore` 內） |
+
+
+## C.8 後續修正：coverage 對未取樣參數改為 fail-closed（2026-09-07）
+
+處理 §C.6 第 5 項。**這是工具面的 fail-closed 補強，不影響已經跑完的 bh_ringdown 或
+bounce 校準結果**——Part C 的分析本來就只取 6 個實際取樣的參數，所以沒有重跑任何 campaign。
+
+### 舊行為
+
+`validation/injection.py::InjectionRecoveryResult._compute_coverage()` 的
+`lo, hi = ci.get(p, (-np.inf, np.inf))`：對 posterior 裡不存在的參數，區間退回
+`(-inf, +inf)`，於是**每一個真值都落在區間內**，覆蓋率算出來是 1.0，而且分母仍然除以全部
+`n` 次注入。結果是一個被宣告但從未被取樣的參數會回報「完美覆蓋」，沒有警告也沒有錯誤。
+
+### 新行為
+
+依每個注入參數實際拿到 credible interval 的次數把參數分成三類：
+
+| 類別 | 條件 | 處置 |
+|---|---|---|
+| 可計分 | 全部 `n` 次注入都有區間 | 進入 `coverage` / `sbc_ranks`，數值行為完全不變 |
+| `unsampled_parameters` | **0** 次有區間 | 排除，不計分；`coverage_of()` 查詢時 raise |
+| `partially_sampled_parameters` | 介於 1 與 `n-1` 之間 | 排除（否則分母不一致）；查詢時 raise |
+
+- `ci.get(p, ...)` 的預設值整個刪除：迴圈只對「保證存在」的參數取 `ci[p]`，所以這裡再出現
+  `KeyError` 就是真正的不一致，而不是被預設值蓋掉。
+- 新增公開方法 `coverage_of(param)`：可計分的參數回傳數值；未取樣／部分取樣／根本沒注入的
+  參數分別 raise 帶有不同訊息的 `KeyError`，由呼叫端自己決定要不要 catch。
+- 被排除的參數會用 `logger.warning` 明確列出，不是靜默消失。
+
+另外，`run_injections()` 在單次推論失敗時會塞一個「posterior 只有一列、且就位在真值上」的
+placeholder，它的區間必然包含真值。這個 placeholder 保留（維持各串列長度對齊），但
+metadata 新增 `failed_indices` 與 `n_failed`，讓「這次 coverage 裡含有幾筆是失敗的
+placeholder」變成可見的 provenance 而不是隱含假設。
+
+### 呼叫端檢查
+
+依要求逐一確認，沒有任何既有邏輯依賴「查詢未取樣參數」這個行為：
+
+| 呼叫端 | 用到什麼 | 影響 |
+|---|---|---|
+| `injection.py::summary()` | `self.coverage` / `self.sbc_ranks` | 兩者鍵集合一致，改動後對 bounce 從 12 列變成 6 列——正是這次要修掉的虛胖 |
+| `calibration_report.py::_evaluate_coverage()` | `summary()` 的 `coverage_ok` | 判定條件是 `n_ok == n_total`，被移除的都是舊行為下必然 `ok=True` 的虛列，所以 PASS/FAIL 結論不變；若全部參數都未取樣則 `cov_df` 為空，回傳 `pass=False`（fail-closed） |
+| `calibration_report.py::_plot_coverage()` | 同上 | 少畫幾根虛胖的長條 |
+| `cli.py` 的 sensitivity 曲線、`compute_sensitivity_curve()` | 只用 `theta_true` / `evidences` | 不受影響 |
+
+### 測試
+
+新增 `tests/test_coverage_fail_closed.py`（11 個）：未取樣參數被排除且不等於 1.0、查詢時
+raise、部分取樣同樣排除並 raise、查詢未注入參數 raise、排除時會發出警告；以及鎖住既有正常
+數值的 regression（10 次注入中 7 次覆蓋 → `coverage == 0.7`、SBC rank 全部等於 50、
+`summary()` 只列出計分參數、全覆蓋仍回傳 1.0、空 campaign 仍可處理）；最後一個測試用
+真的 `InjectionRecovery` 跑 bounce，確認 12 個宣告參數中 6 個計分、6 個進
+`unsampled_parameters`。
+
+`pytest`：**192 passed, 1 skipped, 1 deselected**（`d4bce4e` 基準是 181 passed；差額為新增的
+11 個測試），無非預期 regression。
