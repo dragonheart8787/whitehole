@@ -65,6 +65,7 @@ def bounce_params():
         "M": 60.0,
         "a_star": 0.6,
         "log10_tau_bounce_yr": 5.0,
+        "log10_dt_bounce_s": -1.0,
         "log10_ell_q": 3.0,
         "p_lifetime": 4,
         "eps_f": 0.05,

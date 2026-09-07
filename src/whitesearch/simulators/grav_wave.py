@@ -28,7 +28,15 @@ except ImportError:
     from scipy.signal import tukey  # type: ignore[attr-defined]
 
 from .base import BaseSimulator, SimData
-from ..utils.constants import G, C, M_SUN
+from ..utils.constants import (
+    G,
+    C,
+    M_SUN,
+    MPC_M,
+    BOUNCE_BURST_FREQ_FACTOR,
+    BOUNCE_BURST_Q_FACTOR,
+    BOUNCE_BURST_Q_MIN,
+)
 from ..utils.math_utils import ringdown_waveform, kerr_qnm_frequency, estimate_psd
 
 
@@ -180,7 +188,13 @@ class GravitationalWaveSimulator(BaseSimulator):
         else:
             amplitude_source = "M_D_L_inclination"
             i = params.get("i", 0.0)
-            D_L_m = params.get("D_L", 100.0) * 3.086e22
+            # utils.constants.MPC_M, not a rounded 3.086e22 literal: the
+            # likelihood template uses MPC_M, and the 1.0449e-04 relative
+            # difference between them made the injected and modelled
+            # amplitudes disagree by that factor.  Found by the burst-timing
+            # consistency test below, which compares the two waveforms sample
+            # for sample.
+            D_L_m = params.get("D_L", 100.0) * MPC_M
             h0 = float(G * M * M_SUN / (C**2 * D_L_m))
             # Plus polarisation only, matching
             # GWLikelihood._build_template()'s A_rd = h0 * 0.5*(1 + cos^2 i)
@@ -203,14 +217,24 @@ class GravitationalWaveSimulator(BaseSimulator):
         else:
             A_b = 0.0
 
-        tau_bounce_s = params.get("log10_tau_bounce_yr", None)
-        if tau_bounce_s is not None and A_b > 0:
-            from ..utils.constants import GYR_S
-            tau_s = float(10.0 ** tau_bounce_s * GYR_S / 1e9)
-            t_bounce_event = t_merger + tau_s
-            if t_bounce_event < duration:
+        # Burst delay is measured from the merger in seconds, the same
+        # definition GWLikelihood._build_template() uses -- and the same
+        # BOUNCE_BURST_* factors -- so the injected burst and the fitted burst
+        # are one forward model.  The previous code converted
+        # log10_tau_bounce_yr (a cosmological lifetime, in YEARS) to seconds,
+        # which put the burst at least 3.156e+04 s after the merger and so
+        # never inside the segment.  See docs/BOUNCE_PREFLIGHT_AUDIT.md D.1.
+        log10_dt_bounce = params.get("log10_dt_bounce_s", None)
+        if log10_dt_bounce is not None and A_b > 0:
+            t_bounce_event = t_merger + float(10.0 ** log10_dt_bounce)
+            # Same guard as the template's (times[-1], not duration).
+            if t_bounce_event < times[-1]:
                 h_plus += ringdown_waveform(
-                    times, t_bounce_event, A_b, f_rd * 0.8, max(2.0, q_rd * 0.5)
+                    times,
+                    t_bounce_event,
+                    A_b,
+                    f_rd * BOUNCE_BURST_FREQ_FACTOR,
+                    max(BOUNCE_BURST_Q_MIN, BOUNCE_BURST_Q_FACTOR * q_rd),
                 )
 
         # ── Taper the signal ──────────────────────────────────────────────────

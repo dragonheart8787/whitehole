@@ -109,7 +109,7 @@ class TestBilbyRunner:
         # model: BlackToWhiteBounce declares 12 parameters, GWLikelihood
         # ("bounce") reads 6.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.1.
         expected = BilbyRunner.effective_parameter_names(model, ll)
-        assert expected == ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
+        assert sorted(expected) == sorted(["M", "a_star", "eps_f", "eps_Q", "log10_A_bounce", "log10_dt_bounce_s", "D_L", "i"])
         assert list(result.posterior.columns) == expected
 
     def test_compare_models_returns_dataframe(

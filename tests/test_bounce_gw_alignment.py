@@ -24,7 +24,7 @@ from whitesearch.models import get_model
 from whitesearch.models.alternatives import BAND_HIGH_HZ, BAND_LOW_HZ
 from whitesearch.models.bounce import BlackToWhiteBounce
 from whitesearch.simulators import get_simulator
-from whitesearch.simulators.grav_wave import antenna_response
+from whitesearch.simulators.grav_wave import antenna_response, tukey
 from whitesearch.utils.constants import C, G, M_SUN, MPC_M
 from whitesearch.utils.math_utils import kerr_qnm_frequency
 
@@ -35,7 +35,7 @@ CONTEXT = {
     "low_freq_cutoff": 20.0,
     "rng_seed": 0,
 }
-GW_BOUNCE_PARAMS = ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
+GW_BOUNCE_PARAMS = ["M", "a_star", "eps_f", "eps_Q", "log10_A_bounce", "log10_dt_bounce_s", "D_L", "i"]
 
 
 class TestSampledDimensionComesFromTheLikelihood:
@@ -44,10 +44,10 @@ class TestSampledDimensionComesFromTheLikelihood:
     def test_bounce_samples_only_what_the_gw_likelihood_reads(self):
         model = get_model("bounce")
         sampled = BilbyRunner.effective_parameter_names(model, GWLikelihood("bounce"))
-        assert sampled == GW_BOUNCE_PARAMS
-        assert len(sampled) == len(GWLikelihood("bounce").parameter_names)
+        assert sorted(sampled) == sorted(GW_BOUNCE_PARAMS)
+        assert len(sampled) == len(GWLikelihood("bounce").parameter_names) == 8
         # the model itself keeps its full declaration: other channels may use it
-        assert len(model.parameter_names) == 12
+        assert len(model.parameter_names) == 13
 
     def test_bh_ringdown_dimension_is_unchanged_by_the_intersection(self):
         """Already-aligned models must behave exactly as before."""
@@ -77,7 +77,7 @@ class TestSampledDimensionComesFromTheLikelihood:
         full = model.to_bilby_priors()
         restricted = BilbyRunner._restrict_priors(full, GW_BOUNCE_PARAMS)
         assert sorted(restricted) == sorted(GW_BOUNCE_PARAMS)
-        assert len(full) == 12
+        assert len(full) == 13
 
     def test_toy_sampler_posterior_has_the_restricted_columns(self, tmp_path):
         model = get_model("bounce")
@@ -89,41 +89,149 @@ class TestSampledDimensionComesFromTheLikelihood:
         result = runner.run(
             GWLikelihood("bounce"), data, CONTEXT, model, label="restricted",
         )
-        assert list(result.posterior.columns) == GW_BOUNCE_PARAMS
-        assert result.metadata["sampled_parameters"] == GW_BOUNCE_PARAMS
+        assert sorted(result.posterior.columns) == sorted(GW_BOUNCE_PARAMS)
+        assert sorted(result.metadata["sampled_parameters"]) == sorted(GW_BOUNCE_PARAMS)
 
 
-class TestBurstIsOutOfTheGWSamplingSpace:
-    """B.3 — option B3-3."""
+class TestBurstIsBackInTheGWSamplingSpace:
+    """B3-2 — the burst delay is re-parameterised and inferred again.
 
-    def test_burst_parameters_are_not_sampled(self):
+    This class replaces TestBurstIsOutOfTheGWSamplingSpace, which locked in the
+    B3-3 state where log10_A_bounce and log10_tau_bounce_yr were removed from
+    the GW sampling space because no prior draw could put the burst inside the
+    segment.
+    """
+
+    def test_burst_parameters_are_sampled_again(self):
         names = GWLikelihood("bounce").parameter_names
-        assert "log10_A_bounce" not in names
-        assert "log10_tau_bounce_yr" not in names
+        assert "log10_A_bounce" in names
+        assert "log10_dt_bounce_s" in names
 
-    def test_burst_could_never_reach_the_segment_anyway(self):
-        """The measurement behind the decision, locked in."""
-        from whitesearch.utils.constants import GYR_S
+    def test_the_cosmological_lifetime_is_still_not_sampled(self):
+        """log10_tau_bounce_yr is a different quantity, kept on the model."""
+        assert "log10_tau_bounce_yr" not in GWLikelihood("bounce").parameter_names
+        assert "log10_tau_bounce_yr" in get_model("bounce").parameter_names
 
+    def test_prior_draws_now_land_inside_the_segment(self):
+        """The reverse of the B.3 measurement: prior mass ~1.0, not 0.0000."""
+        model = get_model("bounce")
+        rng = np.random.default_rng(5)
+        duration = CONTEXT["duration"]
+        t_merger = CONTEXT["t_merger"]
+        last_sample_time = duration - 1.0 / CONTEXT["sample_rate"]
+        inside = 0
+        n = 5000
+        for _ in range(n):
+            theta = model.sample_prior(rng)
+            if t_merger + 10.0 ** theta["log10_dt_bounce_s"] < last_sample_time:
+                inside += 1
+        assert inside == n, f"only {inside}/{n} prior draws put the burst in segment"
+
+    def test_declared_prior_sits_inside_the_derived_bounds(self):
         specs = {p.name: p for p in get_model("bounce").parameters()}
-        tau_lo = specs["log10_tau_bounce_yr"].prior_kwargs["low"]
-        shortest_tau_s = 10.0**tau_lo * GYR_S / 1e9
-        for duration in (4.0, 32.0):
-            assert shortest_tau_s > duration, (duration, shortest_tau_s)
+        lo, hi = BlackToWhiteBounce._dt_bounce_prior_bounds()
+        assert lo <= specs["log10_dt_bounce_s"].prior_kwargs["low"]
+        assert specs["log10_dt_bounce_s"].prior_kwargs["high"] <= hi
 
-    def test_template_from_a_sampled_theta_carries_no_burst(self):
+    def test_segment_constants_match_the_shipped_run_config(self):
+        import yaml
+
+        from whitesearch.models.bounce import (
+            SEGMENT_DURATION_S, SEGMENT_SAMPLE_RATE_HZ, SEGMENT_T_MERGER_S,
+        )
+
+        inst = yaml.safe_load(
+            open("configs/runs/gw_run.yaml", encoding="utf-8")
+        )["instrument"]
+        assert SEGMENT_SAMPLE_RATE_HZ == inst["sample_rate"]
+        assert SEGMENT_DURATION_S == inst["duration"]
+        assert SEGMENT_T_MERGER_S == inst["t_merger"]
+
+    def test_simulator_and_template_place_the_burst_at_the_same_time(self):
+        """Forward-model consistency on the burst timing."""
         model = get_model("bounce")
         like = GWLikelihood("bounce")
-        theta = {p: v for p, v in model.sample_prior(np.random.default_rng(0)).items()
-                 if p in GW_BOUNCE_PARAMS}
-        times = np.arange(4096) / 4096.0
-        freqs = np.fft.rfftfreq(4096, d=1.0 / 4096)
-        h = like._build_template(theta, times, 0.1, freqs, 2048.0, BAND_LOW_HZ)
-        assert h is not None
-        # identical to the same call with the burst keys explicitly absent
-        assert np.array_equal(
-            h, like._build_template(dict(theta), times, 0.1, freqs, 2048.0, BAND_LOW_HZ)
-        )
+        sr = CONTEXT["sample_rate"]
+        n = int(CONTEXT["duration"] * sr)
+        times = np.arange(n) / sr
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        rng = np.random.default_rng(17)
+        for _ in range(5):
+            theta = model.sample_prior(rng)
+            theta["log10_A_bounce"] = -19.0  # loud enough to locate
+            expected_t = CONTEXT["t_merger"] + 10.0 ** theta["log10_dt_bounce_s"]
+
+            signal = get_simulator("gw").signal_only(theta, CONTEXT)
+            template = like._build_template(
+                theta, times, CONTEXT["t_merger"], freqs, sr / 2.0, BAND_LOW_HZ
+            )
+            assert template is not None
+            # The simulator tapers the injected signal with a Tukey window
+            # before adding noise; the template is untapered (loglike() tapers
+            # strain and template together).  Applying the same window makes
+            # the two waveforms directly comparable, which is the real
+            # forward-model consistency claim: identical amplitudes AND
+            # identical burst timing, sample for sample.
+            # signal_only() recovers the signal as (signal + noise) - noise, so
+            # samples far below the noise scale cancel to exactly zero; compare
+            # with an absolute floor well under the burst amplitude rather than
+            # demanding bit equality in that numerical dust.
+            window = tukey(len(times), alpha=0.1)
+            atol = 1e-6 * 10.0 ** theta["log10_A_bounce"]
+            assert np.allclose(signal.data, template * window, rtol=1e-6, atol=atol)
+            # and the onset really is where the parameterisation says
+            burst_index = int(round(expected_t * sr))
+            assert np.abs(template[burst_index]) == pytest.approx(
+                10.0 ** theta["log10_A_bounce"], rel=1e-6
+            )
+
+
+class TestBurstFrequencyIsBandChecked:
+    """B.5 — 0.8*f_rd must be rejected when it leaves the band."""
+
+    def test_burst_below_the_cutoff_is_rejected(self):
+        like = GWLikelihood("bounce")
+        sr = CONTEXT["sample_rate"]
+        n = int(CONTEXT["duration"] * sr)
+        times = np.arange(n) / sr
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        # f_rd = 22 Hz is in band, but 0.8*22 = 17.6 Hz is not
+        theta = {"M": 1.0, "a_star": 0.0, "eps_f": 0.0, "eps_Q": 0.0,
+                 "log10_A_bounce": -21.0, "log10_dt_bounce_s": -1.0,
+                 "D_L": 400.0, "i": 0.5}
+        k = kerr_qnm_frequency(1.0, 0.0)[0]
+        theta["M"] = k / 22.0
+        assert BAND_LOW_HZ <= kerr_qnm_frequency(theta["M"], 0.0)[0] <= BAND_HIGH_HZ
+        assert like._build_template(
+            theta, times, CONTEXT["t_merger"], freqs, sr / 2.0, BAND_LOW_HZ
+        ) is None
+
+    def test_burst_inside_the_band_is_accepted(self):
+        like = GWLikelihood("bounce")
+        sr = CONTEXT["sample_rate"]
+        n = int(CONTEXT["duration"] * sr)
+        times = np.arange(n) / sr
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        k = kerr_qnm_frequency(1.0, 0.0)[0]
+        theta = {"M": k / 200.0, "a_star": 0.0, "eps_f": 0.0, "eps_Q": 0.0,
+                 "log10_A_bounce": -21.0, "log10_dt_bounce_s": -1.0,
+                 "D_L": 400.0, "i": 0.5}
+        assert like._build_template(
+            theta, times, CONTEXT["t_merger"], freqs, sr / 2.0, BAND_LOW_HZ
+        ) is not None
+
+    def test_bh_ringdown_is_not_burst_band_checked(self):
+        """The extra check is bounce-only; bh_ringdown has no burst."""
+        like = GWLikelihood("bh_ringdown")
+        sr = CONTEXT["sample_rate"]
+        n = int(CONTEXT["duration"] * sr)
+        times = np.arange(n) / sr
+        freqs = np.fft.rfftfreq(n, d=1.0 / sr)
+        k = kerr_qnm_frequency(1.0, 0.0)[0]
+        theta = {"M": k / 22.0, "a_star": 0.0, "log10_A": -21.0}
+        assert like._build_template(
+            theta, times, CONTEXT["t_merger"], freqs, sr / 2.0, BAND_LOW_HZ
+        ) is not None
 
 
 class TestSimulatorAndTemplateAgreeOnAmplitude:

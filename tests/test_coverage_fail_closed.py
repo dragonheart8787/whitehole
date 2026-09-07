@@ -141,12 +141,10 @@ class TestRealCampaignShape:
         )
         result = ir.run_injections(model, GWLikelihood("bounce"), context)
 
-        assert len(model.parameter_names) == 12
-        assert sorted(result.coverage) == sorted(
-            ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
-        )
+        assert len(model.parameter_names) == 13
+        assert sorted(result.coverage) == sorted(["M", "a_star", "eps_f", "eps_Q", "log10_A_bounce", "log10_dt_bounce_s", "D_L", "i"])
         assert sorted(result.unsampled_parameters) == sorted(
             ["log10_tau_bounce_yr", "log10_ell_q", "p_lifetime",
-             "log10_A_bounce", "eta_r", "eta_gamma"]
+             "eta_r", "eta_gamma"]
         )
         assert result.metadata["n_failed"] == 0

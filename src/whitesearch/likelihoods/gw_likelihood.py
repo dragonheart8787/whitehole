@@ -19,7 +19,15 @@ from ..utils.math_utils import (
     ringdown_waveform,
     kerr_qnm_frequency,
 )
-from ..utils.constants import G, C, M_SUN, MPC_M
+from ..utils.constants import (
+    G,
+    C,
+    M_SUN,
+    MPC_M,
+    BOUNCE_BURST_FREQ_FACTOR,
+    BOUNCE_BURST_Q_FACTOR,
+    BOUNCE_BURST_Q_MIN,
+)
 
 # Soft floor instead of -inf for dynesty stability.  Must sit BELOW any
 # genuine in-band log-likelihood so template-rejected points rank worst:
@@ -61,10 +69,16 @@ class GWLikelihood(BaseLikelihood):
         if self.model_name == "null":
             return []
         if self.model_name == "bounce":
-            # log10_A_bounce and log10_tau_bounce_yr are deliberately absent:
-            # the GW channel does not infer the bounce burst.  See the note on
-            # _build_template() below.
-            return ["M", "a_star", "eps_f", "eps_Q", "D_L", "i"]
+            # log10_dt_bounce_s (the burst delay measured from the merger) and
+            # log10_A_bounce are both sampled.  log10_tau_bounce_yr -- the
+            # cosmological BH lifetime -- is NOT: it is a different physical
+            # quantity that no observable strain segment constrains.  See
+            # docs/BOUNCE_PREFLIGHT_AUDIT.md sections B.3 and D.1.
+            return [
+                "M", "a_star", "eps_f", "eps_Q",
+                "log10_A_bounce", "log10_dt_bounce_s",
+                "D_L", "i",
+            ]
         # bh_ringdown (and any other non-bounce GW model routed here) is a
         # phenomenological ringdown: the template amplitude is the free
         # log10_A used by _build_template() below.  D_L and i used to be
@@ -212,36 +226,42 @@ class GWLikelihood(BaseLikelihood):
         if f_rd < low_freq or f_rd > 0.95 * nyquist:
             return None
 
+        # The bounce burst sits at BOUNCE_BURST_FREQ_FACTOR * f_rd, so a
+        # ringdown inside the band can still put its burst below the low-
+        # frequency cutoff.  Reject those the same way, instead of leaving a
+        # blind spot where the template carries a component the inner product
+        # never sees.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.5.
+        f_burst = f_rd * BOUNCE_BURST_FREQ_FACTOR
+        if self.model_name == "bounce" and (
+            f_burst < low_freq or f_burst > 0.95 * nyquist
+        ):
+            return None
+
         h = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)
 
         if self.model_name == "bounce":
-            # The GW channel does not infer the bounce burst, so this branch is
-            # unreachable for parameters drawn from the sampler: log10_A_bounce
-            # and log10_tau_bounce_yr are not in
-            # GWLikelihood("bounce").parameter_names.
-            #
-            # Why: log10_tau_bounce_yr is a cosmological BH lifetime in YEARS
-            # with prior U(-3, 10), i.e. tau in [3.156e+04, 3.156e+17] s.  The
-            # burst is only inside the analysed strain when
-            # t_merger + tau < duration, which needs log10_tau_yr < -6.90 for a
-            # 4 s segment (-5.99 for 32 s).  Prior mass satisfying that is
-            # 0.0000 -- no prior draw ever puts the burst in the segment.  See
-            # docs/BOUNCE_PREFLIGHT_AUDIT.md section B.3 for the measurements.
-            #
-            # The branch is kept (not deleted) so a caller passing an explicit
-            # theta can still evaluate a burst template.  Inferring the burst
-            # in the GW channel first needs the burst delay re-parameterised
-            # relative to the merger rather than as a cosmological lifetime
-            # (audit option B3-2); that is a model-design change, not this one.
-            if "log10_A_bounce" in theta and "log10_tau_bounce_yr" in theta:
+            # Burst delay is measured from the merger in seconds
+            # (log10_dt_bounce_s), not converted from the cosmological
+            # lifetime log10_tau_bounce_yr.  Under the old parameterisation the
+            # shortest prior draw put the burst 3.156e+04 s after the merger,
+            # i.e. never inside a 4 s or 32 s segment (prior mass 0.0000), so
+            # the burst was a dead component.  See
+            # docs/BOUNCE_PREFLIGHT_AUDIT.md sections B.3 and D.1.
+            if "log10_A_bounce" in theta and "log10_dt_bounce_s" in theta:
                 A_b = float(10.0 ** theta["log10_A_bounce"])
-                from ..utils.constants import GYR_S
-                tau_s = float(10.0 ** theta["log10_tau_bounce_yr"] * GYR_S / 1e9)
-                t_bounce = t_merger + tau_s
-                if t_bounce < times[-1]:
-                    h += ringdown_waveform(
-                        times, t_bounce, A_b, f_rd * 0.8, max(2.0, q_rd * 0.5)
-                    )
+                dt_bounce = float(10.0 ** theta["log10_dt_bounce_s"])
+                t_bounce = t_merger + dt_bounce
+                if t_bounce >= times[-1]:
+                    # fail closed: a burst outside the segment is a template
+                    # this data cannot constrain, not a silent pure ringdown.
+                    return None
+                h = h + ringdown_waveform(
+                    times,
+                    t_bounce,
+                    A_b,
+                    f_burst,
+                    max(BOUNCE_BURST_Q_MIN, BOUNCE_BURST_Q_FACTOR * q_rd),
+                )
         return h
 
     @staticmethod

@@ -82,3 +82,14 @@ OMEGA_B = 0.0493
 
 # DM–z relation coefficient (Macquart+ 2020)
 DM_IGM_PER_Z = 855.0    # pc/cm^3 per unit redshift (average)
+
+
+# ── Bounce burst waveform, relative to the ringdown ──────────────────────────
+# Shared by simulators/grav_wave.py (injection), likelihoods/gw_likelihood.py
+# (template) and models/bounce.py (prior derivation) so the three cannot drift
+# apart.  The burst is modelled as a second damped sinusoid at
+# BOUNCE_BURST_FREQ_FACTOR * f_ringdown with quality
+# max(BOUNCE_BURST_Q_MIN, BOUNCE_BURST_Q_FACTOR * Q_ringdown).
+BOUNCE_BURST_FREQ_FACTOR = 0.8
+BOUNCE_BURST_Q_FACTOR = 0.5
+BOUNCE_BURST_Q_MIN = 2.0
