@@ -694,3 +694,115 @@ rank 在 0 與 L 兩端堆積的觀測樣態。
 |---|---|---|
 | `docs/calibration/bounce_b32_sbc_rank_statistics.csv` | 8 個參數的 rank 統計、kstest／χ² p 值、三個層級的 coverage 與偏離 σ | 是 |
 | `docs/calibration/bounce_b32_posterior_widths.csv` | 每筆注入、每個參數的 posterior 相對寬度 | 是 |
+
+---
+
+# Part E：mock likelihood 尺度對校準影響的診斷（2026-09-07）
+
+> **這是診斷性工作，不代表任何 production 行為的改變。** 沒有修改任何 production 程式碼；
+> `TAPER_ALPHA` 只在診斷腳本自己的行程內被覆寫（比照第一輪
+> `BH_RINGDOWN_SBC_COVERAGE_REPORT.md` §3.2 Campaign C 的做法），repo 內的常數維持 0.1。
+> 本節不含任何天文物理宣稱。
+
+## E.1 要檢驗的假說
+
+§D.6 提出的假說是：發現 (C)（taper 在 mock 路徑上讓 per-bin ⟨d|d⟩ 膨脹約 10⁷ 倍）
+疊加 B3-2 新引入的自由連續時序參數 `log10_dt_bounce_s`，是 Part D 中 posterior
+系統性崩潰過窄（10¹¹ σ 偏離、時序精度到 ~2.4×10⁻⁷ 秒）的根本原因。
+
+假說的機制是：likelihood 尺度被膨脹 ≈ 有效雜訊變異數被縮小 ≈ posterior 被壓窄。
+
+## E.2 結論：**假說被否證**
+
+**關掉 taper 確實把 likelihood 的尺度完全修好了，但它完全沒有改變 likelihood 峰的寬度。**
+因此 (C) 不可能是 posterior 過窄的成因。
+
+### 尺度確實被修好（taper 覆寫有生效）
+
+8 筆配對注入（種子與 Part D 相同，資料逐位元相同，只有 likelihood 的 taper 不同）：
+
+| 量 | `TAPER_ALPHA=0.1` | `TAPER_ALPHA=0.0` |
+|---|---|---|
+| per-bin ⟨d\|d⟩（理論值 2.0） | **3.21×10⁷** | **2.18** |
+| null lnL | −1.08×10¹¹ | −7.34×10³ |
+
+這重現了發現 (C) 的既有量測，也確認診斷腳本的覆寫確實生效。
+
+### 但 likelihood 峰的寬度沒有變
+
+對每筆注入，把其他參數固定在真值、沿單一參數掃描 lnL，量測 lnL 下降 0.5 的半寬
+（局部高斯下即 1σ 寬度）。**taper 0.0 相對 0.1 的寬度比值：**
+
+| 參數 | 半寬比值（0.0 / 0.1）中位數 |
+|---|---|
+| `log10_dt_bounce_s` | **0.9956** |
+| `M` | **0.9986** |
+| `log10_A_bounce` | **1.0000** |
+| `eps_f` | **1.0000** |
+
+換句話說，taper 讓 |lnL| 差了 7 個數量級，卻幾乎完全不改變峰的形狀。
+
+### 直接的機制證據
+
+固定同一組參數、在 `log10_dt_bounce_s` 上走一個 10⁻⁷ 的小步：
+
+| | lnL 絕對值 | 該小步造成的 Δ(lnL) |
+|---|---|---|
+| `TAPER_ALPHA=0.1` | 1.207×10¹¹ | **−8.4076×10⁻³** |
+| `TAPER_ALPHA=0.0` | 6.744×10³ | **−8.4144×10⁻³** |
+
+**曲率一致到 0.08%。** taper 對 lnL 的貢獻在參數空間中（到 0.1% 以內）是一個
+**與參數無關的加法常數**——它平移 lnL，不縮放殘差。既然不縮放，就不會壓窄 posterior。
+
+數值可解析性已確認，不是被浮點誤差蓋掉：在 |lnL| = 1.21×10¹¹ 時 float64 的 ulp 是
+1.53×10⁻⁵ nats，0.5 nat 的落差相當於 3.28×10⁴ 個 ulp；同一點重複計算的離散度為 0
+（完全確定性）。
+
+## E.3 那麼窄峰從哪裡來
+
+**峰本來就很窄，兩個 taper 設定下都是。** `log10_dt_bounce_s` 的半寬中位數是 0.0164 dex，
+相對於 3.4 dex 的先驗跨度是 **4.8×10⁻³**；最窄的一筆是 1.5×10⁻⁴ dex，即先驗跨度的
+**4.4×10⁻⁵**。
+
+這是 likelihood 本身的性質，不是 taper 造成的。一個合理的來源是
+`utils/math_utils.ringdown_waveform()` 的波形在 `t0` 是**不連續的**（`t < t0` 恆為 0，
+到 `t0` 突然跳到振幅 A）。階梯不連續點的位置可以被 matched filter 定位到遠比衰減時間
+（~5 ms）精細的程度。**本節沒有做進一步實驗去確認這一點，僅記錄為觀察。**
+
+如果 likelihood 真的有一個這麼窄的針狀峰，那麼「posterior 很窄」本身並不是錯誤——
+錯的是 posterior 沒有涵蓋真值。這把問題的性質從「likelihood 尺度錯誤」改寫成
+**「取樣器解析度不足」**：`nlive=250` 在 8 維空間裡要找到一個在單一維度上就只佔先驗
+4×10⁻⁵ 的針，本來就極可能失敗、收斂到附近一個假的窄模態上——這正好產生 Part D 觀測到的
+「posterior 極窄且不含真值、rank 在 0 與 L 兩端堆積、|z| 達 10¹¹」的樣態。
+
+**這是本節證據指向的方向，不是已驗證的結論，也沒有據此修改任何東西。**
+
+## E.4 taper=0.0 的 SBC 對照 campaign
+
+依要求也啟動了 N=24（4 shard × 6，種子與 Part D 前 6 筆配對）、`nlive=250`、
+`likelihood_mode=full`、8 維、`TAPER_ALPHA=0.0` 的 SBC/coverage 對照 campaign。
+
+**該 campaign 未能完成。** 執行期間容器每 10–20 分鐘被回收一次，每次啟動後背景行程只存活
+約 3.5–4.5 分鐘。bilby 預設的 `check_point_delta_t` 是 600 秒，行程活不到第一個 checkpoint，
+`resume=True` 形同虛設；改成每 90 秒 checkpoint（`check_point_delta_t=90`，
+`check_point_plot=False`——只改狀態寫入頻率，`nlive`、sampler、資料、taper 覆寫皆未變）之後
+checkpoint 確實開始產生，但累積速度仍遠低於需求。截至記錄時完成 **2/24**。
+
+§E.2 的曲率量測不依賴這個 campaign，而且它對 (C) 的機制已經給出決定性答案，
+所以本節的結論不受 campaign 未完成影響。若之後仍要取得 taper=0.0 的 SBC 數字，
+需要一個不會每幾分鐘回收一次的執行環境。
+
+## E.5 一句話結論
+
+**假說不成立：關掉 taper 把 mock 的 likelihood 尺度從 per-bin ⟨d|d⟩ = 3.21×10⁷ 修回
+2.18（理論值 2.0）、null lnL 從 −1.08×10¹¹ 修回 −7.3×10³，但 likelihood 峰的寬度比值是
+0.9956–1.0000、曲率一致到 0.08%，所以發現 (C) 對 posterior 寬度沒有影響，不是 Part D
+校準崩潰的成因；證據反而指向「burst 時序方向本來就存在的極窄 likelihood 峰
+（先驗跨度的 4×10⁻⁵ 到 5×10⁻³）超出 `nlive=250` 在 8 維下的解析能力」，但這一點尚未驗證，
+本輪未據此做任何修正。**
+
+## E.6 產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `docs/calibration/bounce_taper_curvature_diagnostic.csv` | 8 筆配對注入在兩個 taper 設定下的 lnL、null lnL、per-bin ⟨d\|d⟩，以及四個參數的 lnL 峰半寬 | 是 |
