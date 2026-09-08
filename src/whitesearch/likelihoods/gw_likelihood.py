@@ -50,6 +50,56 @@ HH_MIN = 1e-30
 # gw_units.py for why no additional power-compensation factor is applied.
 TAPER_ALPHA = 0.1
 
+# Taper is a correction for ONE specific defect: a full-segment rectangular-window
+# rfft analysed against a PSD estimated by Welch (short, Hann-windowed segments).
+# The two disagree about spectral leakage, and on real strain that mismatch
+# inflates noise-weighted inner products near the band edges.  Data whose PSD is
+# the exact analytic spectrum its noise was generated from has no such mismatch:
+# the mock simulator fills rfft bins directly and irffts them, so at
+# taper_alpha = 0 its spectrum is diagonal by construction (measured per-bin
+# <n|n> = 1.96-2.05 against a theory value of 2.0).  Applying the taper there
+# CREATES the problem it was meant to fix: the time-domain window convolves in
+# frequency and smears the 20-60 Hz seismic wall of aligo_psd_analytic() -- which
+# spans ~20 decades inside the analysis band -- across 100-1700 Hz, inflating
+# per-bin <n|n> to 5.8e6-1.3e8 and displacing the likelihood maximum of a loud
+# injection by 100+ carrier periods.  See docs/BOUNCE_PREFLIGHT_AUDIT.md Part H.
+#
+# So the taper follows the data's PSD provenance, not a global constant.  The
+# discriminator is the existing ``source`` provenance field carried in the GW
+# observation metadata (dataio/gw_observation.py, dataio/gwosc.py).
+TAPER_ALPHA_NONE = 0.0
+
+# Sources whose PSD is the generative spectrum on the same un-windowed basis as
+# the analysis rfft.  Everything else -- GWOSC strain, and mock strain that has
+# been through GWPreprocessor's bandpass/notch/Welch pipeline (source
+# MOCK_EXPLICIT, MOCK, MOCK_FALLBACK) -- carries a Welch-estimated PSD and needs
+# the taper exactly as before.  Measured for MOCK_EXPLICIT: per-bin <d|d> is
+# 3.4e9 at taper 0.0 versus 9.9 at taper 0.1, so preprocessed mock belongs with
+# real data, not with the raw simulator.
+NO_TAPER_SOURCES = frozenset({"MOCK_SIMULATOR"})
+
+# Recorded verbatim in the run metadata so the choice is never invisible.
+TAPER_REASON_GENERATIVE_PSD = (
+    "source_psd_is_generative_no_window_mismatch"
+)
+TAPER_REASON_WELCH_PSD = "source_psd_is_welch_estimated_window_mismatch"
+TAPER_REASON_UNKNOWN_SOURCE = "source_absent_default_to_real_data_convention"
+
+
+def taper_for_source(source: str | None) -> tuple[float, str]:
+    """Return ``(taper_alpha, reason)`` for a GW observation's ``source`` tag.
+
+    An absent or unrecognised ``source`` keeps the real-data convention
+    (``TAPER_ALPHA``): every caller that predates this branch is unaffected,
+    and a new data path has to opt in explicitly to skip the taper rather
+    than inheriting the skip by omission.
+    """
+    if source is None:
+        return TAPER_ALPHA, TAPER_REASON_UNKNOWN_SOURCE
+    if str(source) in NO_TAPER_SOURCES:
+        return TAPER_ALPHA_NONE, TAPER_REASON_GENERATIVE_PSD
+    return TAPER_ALPHA, TAPER_REASON_WELCH_PSD
+
 
 class GWLikelihood(BaseLikelihood):
     """Frequency-domain GW likelihood for bounce / BH ringdown / null."""
@@ -63,6 +113,11 @@ class GWLikelihood(BaseLikelihood):
         self.model_name = model_name
         self.use_full = use_full_likelihood
         self.ll_min = ll_min
+        # Provenance of the most recent evaluation's taper choice.  Populated
+        # by every loglike() call and copied into run metadata by the
+        # inference runners, so "this run skipped the taper because the data
+        # was mock" is always visible in the record.
+        self.last_taper_config: dict[str, Any] = {}
 
     @property
     def parameter_names(self) -> list[str]:
@@ -86,6 +141,23 @@ class GWLikelihood(BaseLikelihood):
         # sampler explored two parameters the likelihood was flat in.
         return ["M", "a_star", "log10_A"]
 
+    def taper_config(self, data: Any) -> dict[str, Any]:
+        """Resolve the taper for ``data`` from its ``source`` provenance tag.
+
+        Returns the audit record written into run metadata:
+        ``data_source``, ``taper_alpha_used``, ``taper_alpha_reason``.
+        """
+        meta = data.metadata if hasattr(data, "metadata") else data
+        source = None
+        if isinstance(meta, dict):
+            source = meta.get("source")
+        alpha, reason = taper_for_source(source)
+        return {
+            "data_source": source,
+            "taper_alpha_used": float(alpha),
+            "taper_alpha_reason": reason,
+        }
+
     def loglike(
         self,
         theta: dict[str, float],
@@ -102,9 +174,13 @@ class GWLikelihood(BaseLikelihood):
         except (KeyError, AttributeError, ValueError) as exc:
             return self.ll_min
 
+        taper_cfg = self.taper_config(data)
+        self.last_taper_config = taper_cfg
+        taper_alpha = taper_cfg["taper_alpha_used"]
+
         n = len(strain)
         dt = 1.0 / sample_rate
-        freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=TAPER_ALPHA)
+        freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=taper_alpha)
         nyquist = sample_rate / 2.0
 
         times = np.arange(n) * dt
@@ -115,7 +191,7 @@ class GWLikelihood(BaseLikelihood):
         # Same taper as the strain above: the residual strain_f - template_f
         # must see identical windowing or the mismatch shows up as spurious
         # power at the band edges.
-        _, h_template_f, _ = time_to_freq(h_template, dt, taper_alpha=TAPER_ALPHA)
+        _, h_template_f, _ = time_to_freq(h_template, dt, taper_alpha=taper_alpha)
 
         band = self._band_mask(freqs, low_freq, high_freq, nyquist)
         if not np.any(band):
@@ -176,7 +252,11 @@ class GWLikelihood(BaseLikelihood):
         strain, meta, sample_rate, _, low_freq, high_freq = self._parse_data(
             data, context or {}
         )
-        freqs, strain_f, df = time_to_freq(strain, 1.0 / sample_rate, taper_alpha=TAPER_ALPHA)
+        taper_cfg = self.taper_config(data)
+        self.last_taper_config = taper_cfg
+        freqs, strain_f, df = time_to_freq(
+            strain, 1.0 / sample_rate, taper_alpha=taper_cfg["taper_alpha_used"]
+        )
         band = self._band_mask(freqs, low_freq, high_freq, sample_rate / 2.0)
         if not np.any(band):
             return self.ll_min

@@ -264,6 +264,16 @@ class GravitationalWaveSimulator(BaseSimulator):
                 "A_rd": A_rd,
                 "amplitude_source": amplitude_source,
                 "low_freq_cutoff": low_freq,
+                # Provenance tag, same field dataio/gw_observation.py and
+                # dataio/gwosc.py use ("GWOSC", "MOCK_EXPLICIT", "MOCK",
+                # "MOCK_FALLBACK").  This path is distinct from all of those:
+                # "psd" below is the exact analytic spectrum the noise was
+                # generated from, on the same un-windowed basis as the
+                # likelihood's rfft, so there is no Welch-vs-rectangular
+                # window mismatch for a taper to correct.  GWLikelihood reads
+                # this tag to decide; see taper_for_source() there and
+                # docs/BOUNCE_PREFLIGHT_AUDIT.md Part H.
+                "source": "MOCK_SIMULATOR",
             },
             params_true=params,
             noise_realisation=noise,

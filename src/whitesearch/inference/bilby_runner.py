@@ -24,6 +24,24 @@ from ..models.base import BaseModel
 
 logger = logging.getLogger(__name__)
 
+
+def _taper_provenance(likelihood: BaseLikelihood, data: Any) -> dict[str, Any]:
+    """Audit record of the taper this run's likelihood applied, if any.
+
+    Only the GW likelihood has a taper; other channels contribute nothing
+    rather than a misleading null entry.  Keeping this in the run metadata is
+    what stops "this run skipped the taper because the data was mock" from
+    being invisible logic -- see GWLikelihood.taper_for_source().
+    """
+    resolver = getattr(likelihood, "taper_config", None)
+    if resolver is None:
+        return {}
+    try:
+        return dict(resolver(data))
+    except Exception:  # pragma: no cover - provenance must never break a run
+        logger.warning("Could not resolve taper provenance for run metadata")
+        return {}
+
 try:
     import bilby
     import dynesty  # noqa: F401
@@ -237,6 +255,7 @@ class BilbyRunner:
             "model_parameters": list(model.parameter_names),
             "likelihood_parameters": list(likelihood.parameter_names),
         }
+        metadata.update(_taper_provenance(likelihood, data))
         if bound_fallback is not None:
             metadata["bound_fallback_from"] = bound_fallback[0]
             metadata["bound_fallback_to"] = bound_fallback[1]
@@ -513,5 +532,6 @@ class BilbyRunner:
                 "sampled_parameters": list(param_names),
                 "model_parameters": list(model.parameter_names),
                 "likelihood_parameters": list(likelihood.parameter_names),
+                **_taper_provenance(likelihood, data),
             },
         )
