@@ -1307,3 +1307,157 @@ lnL 面上的雜訊漣漪。
 | `docs/calibration/bounce_timing_mode_scan_peaks.csv` | 各注入 lnL 最高的 200 個局部極大值（含全域峰與最靠近真值的峰）的位置、高度、間距 | 是 |
 | `docs/calibration/bounce_timing_peak_location_vs_taper.csv` | 同 8 筆在 `TAPER_ALPHA` 0.1 / 0.0 下的 per-bin ⟨n\|n⟩、argmax 位置、偏移與 ΔlnL | 是 |
 | `scratchpad/mode_timing.py`, `scratchpad/mode_taper.py` | 掃描腳本（只讀 production 模組） | 否 |
+
+---
+
+# Part I：taper 適用範圍修正與 bounce 校準重新驗證（2026-09-08）
+
+> 本節記錄一次 **production 修正**（`likelihoods/gw_likelihood.py`、
+> `simulators/grav_wave.py`、`inference/bilby_runner.py`）與其後的校準重新驗證。
+> 不含任何天文物理宣稱。
+
+## I.1 修正內容
+
+`TAPER_ALPHA` 不再是每次 rfft 都直接讀取的全域常數；改由資料的 **既有 `source`
+provenance 欄位**（`dataio/gw_observation.py` 與 `dataio/gwosc.py` 本來就在設定的
+那個欄位）決定：
+
+| `source` | taper | 理由字串 |
+|---|---|---|
+| `GWOSC` | 0.1 | `source_psd_is_welch_estimated_window_mismatch` |
+| `MOCK_EXPLICIT` / `MOCK` / `MOCK_FALLBACK` | 0.1 | 同上 |
+| `MOCK_SIMULATOR` | 0.0 | `source_psd_is_generative_no_window_mismatch` |
+| 缺漏或無法辨識 | 0.1 | `source_absent_default_to_real_data_convention` |
+
+- `likelihoods/gw_likelihood.py`：新增 `TAPER_ALPHA_NONE`、`NO_TAPER_SOURCES`、
+  `taper_for_source()`、三個 `TAPER_REASON_*` 字串，以及公開的
+  `GWLikelihood.taper_config(data)`。`loglike()` 與 `_null_loglike()` 用解析出來的
+  alpha，**strain 與 template 兩邊用同一個值**（否則 `d − h` 的殘差會看到不同的
+  窗函數），並把結果記在 `self.last_taper_config`。
+- `simulators/grav_wave.py`：metadata 加上 `source: "MOCK_SIMULATOR"`。這是既有
+  provenance 欄位的**新取值**，不是新的判斷機制——原始模擬器輸出本來就是唯一沒有
+  帶 `source` 標記的 GW 資料路徑。
+- `inference/bilby_runner.py`：dynesty 與 toy 兩條路徑都把
+  `data_source` / `taper_alpha_used` / `taper_alpha_reason` 寫進 run metadata。
+
+**判準是 PSD 的來源，不是「mock vs 真實」。** 經過 `GWPreprocessor` 的 mock 資料
+（bandpass/notch + Welch PSD）跟真實資料有完全相同的不匹配，實測 `MOCK_EXPLICIT`
+的 per-bin ⟨d\|d⟩ 在 taper 0.0 下是 3.4×10⁹、在 0.1 下是 9.9，所以它跟真實資料同組。
+`prepare_gw_from_simdata()` 會覆寫標記，因此只有原始模擬器路徑改變行為。
+
+**真實 GWOSC 路徑不變**：`taper_for_source("GWOSC")` 仍然是 0.1，走的是同一段程式碼，
+並有 regression test 鎖住。**但本環境的 `artifacts/gwosc/` 沒有快取 strain，
+所以 GW150914／GW170814 的 per-bin ⟨d\|d⟩ 與 ln Z 數字本身沒有被重跑。**
+
+新增 `tests/test_taper_provenance.py`（15 項）。全套件：213 passed, 1 skipped,
+1 deselected。
+
+## I.2 修正生效的直接驗證（§H.5 方法，走 production 路徑、無 monkeypatch）
+
+同一批 8 筆種子，固定其他 7 個參數在真值，掃描 `log10_dt_bounce_s` 全先驗，
+比較全域最大值位置：
+
+| seed | ρ_burst | per-bin ⟨n\|n⟩（理論 2.0） | 偏移（週期）修正前 → 後 | ΔlnL(argmax−真值) 修正前 → 後 |
+|---|---|---|---|---|
+| 20260907 | 156 | 3.59×10⁷ → 2.007 | +0.0216 → +0.0216 | −393.1 → −393.0 |
+| 20260908 | 84.8 | 5.76×10⁶ → 2.001 | **+105.0 → −0.0017** | **+90.6 → −0.00037** |
+| 20260983 | 59.0 | 4.59×10⁷ → 1.985 | **+131.7 → +0.0046** | **+5968.6 → −0.062** |
+| 20260982 | 2.33 | 2.58×10⁷ → 2.047 | +851.8 → +370.2 | +4.76 → +2.48 |
+| 20260932 | 1.83 | 1.49×10⁷ → 1.964 | +100.1 → +90.2 | +274.7 → +2.23 |
+| 20260957 | 0.461 | 2.83×10⁷ → 1.995 | +848.7 → +198.5 | +3.71 → +2.92 |
+| 20260958 | 0.229 | 4.28×10⁷ → 2.039 | +184.3 → +24.2 | +10.7 → +0.82 |
+| 20260933 | 0.0145 | 1.27×10⁸ → 2.001 | +441.5 → +174.2 | +0.14 → +0.066 |
+
+8 筆全部解析為 `MOCK_SIMULATOR / taper 0.0`，per-bin ⟨n\|n⟩ 回到 1.96–2.05，
+三筆 ρ ≥ 59 的全域最大值回到真值上。五筆低 SNR 仍偏離真值，但 ΔlnL 只剩
+0.066–2.9 nat，與各自的 ½ρ²（1.05×10⁻⁴–2.70）同量級。
+
+## I.3 重新跑的完整規模 campaign
+
+| 項目 | 設定 |
+|---|---|
+| N | 100（4 shard × 25），種子 `20260907 + {0,25,50,75} + i`，與 Part D 完全配對 |
+| L | 100（同一套抽稀與 rank 估計式） |
+| sampler | dynesty，`nlive = 250`（未調整），`likelihood_mode = full`，8 維 |
+| 完成度 | **100/100，0 失敗，0 placeholder，0 缺漏** |
+| posterior 樣本數 | min/median/max = 678 / 904 / 1319 |
+| 每 shard 耗時 | 16434 / 19279 / 16434 / 18472 s（總 wall clock 約 5.4 小時） |
+| taper（由 metadata 記錄） | `MOCK_SIMULATOR`, `0.0`, `source_psd_is_generative_no_window_mismatch` |
+| ln Z | 中位數 −6727.46，`ln_Z_err` 中位數 0.291 |
+
+實際耗時（5.4 h）比 8 筆探測外推的 2.2–2.8 h 慢約一倍；探測抽到的注入偏容易收斂。
+
+## I.4 SBC rank statistics 與 coverage：修正前後
+
+**修正前（Part D，taper 0.1，N=97）**
+
+| 參數 | KS p | χ² p | frac rank 0 | frac rank L | cov 90% | 90% 偏差 |
+|---|---|---|---|---|---|---|
+| `M` | 2.2×10⁻²⁵ | 4.5×10⁻⁹⁷ | 0.495 | 0.010 | 0.423 | −9.52σ |
+| `a_star` | 3.3×10⁻¹⁹ | 3.6×10⁻⁶⁹ | 0.464 | 0.062 | 0.454 | −8.83σ |
+| `eps_f` | 3.3×10⁻¹⁹ | 2.1×10⁻⁷⁴ | 0.031 | 0.464 | 0.423 | −9.52σ |
+| `eps_Q` | 4.8×10⁻²³ | 1.3×10⁻⁸⁸ | 0.505 | 0.041 | 0.392 | −10.25σ |
+| `log10_A_bounce` | 4.1×10⁻²¹ | 2.4×10⁻⁸⁸ | 0.485 | 0.010 | 0.454 | −8.83σ |
+| `log10_dt_bounce_s` | 5.5×10⁻²² | 2.0×10⁻⁸⁸ | 0.495 | 0.010 | 0.443 | −9.05σ |
+| `D_L` | 5.0×10⁻²² | 3.7×10⁻⁸⁰ | 0.495 | 0.010 | 0.485 | −8.19σ |
+| `i` | 5.1×10⁻⁶ | 3.6×10⁻³⁶ | 0.258 | 0.216 | 0.474 | −8.40σ |
+
+**修正後（本輪，taper 由 provenance 決定，N=100）**
+
+| 參數 | KS p | χ² p | frac rank 0 | frac rank L | cov 50% | cov 68% | cov 90% | 90% 偏差 |
+|---|---|---|---|---|---|---|---|---|
+| `M` | 0.172 | **0.0042** | 0.04 | 0.03 | 0.43 | 0.57 | **0.75** | **−3.46σ** |
+| `a_star` | 0.410 | 0.196 | 0.01 | 0.06 | 0.46 | 0.59 | 0.82 | −2.08σ |
+| `eps_f` | 0.042 | **0.0047** | 0.04 | 0.01 | 0.44 | 0.62 | 0.79 | −2.70σ |
+| `eps_Q` | 0.042 | 0.031 | 0.05 | 0.01 | 0.40 | 0.60 | 0.82 | −2.08σ |
+| `log10_A_bounce` | 0.175 | 0.265 | 0.01 | 0.02 | 0.45 | 0.65 | 0.91 | +0.35σ |
+| `log10_dt_bounce_s` | 0.243 | 0.371 | 0.02 | 0.03 | 0.55 | 0.79 | 0.88 | −0.62σ |
+| `D_L` | 0.676 | 0.395 | 0.03 | 0.01 | 0.57 | 0.68 | 0.85 | −1.40σ |
+| `i` | 0.939 | 0.917 | 0.03 | 0.01 | 0.51 | 0.69 | 0.87 | −0.89σ |
+
+多重比較校正後的判定：
+
+- **KS 檢定**：8 個參數，Bonferroni 門檻 p < 0.00625。**沒有任何參數低於門檻**
+  （最低是 `eps_Q` 0.0419、`eps_f` 0.0421）。
+- **χ²（20 bin 直方圖）**：`M`（0.0042）與 `eps_f`（0.0047）**低於門檻，未通過**。
+- **Coverage**：8 參數 × 3 信賴水準 = 24 個檢定，Bonferroni 的 |z| 門檻是 3.078。
+  **`M` 的 90% coverage = 0.75（−3.46σ）超過門檻**，其餘 23 個都在門檻內。
+
+rank 直方圖顯示殘留的形狀：`M` 是 U 型（第一格 14、最後一格 12），
+`eps_f` 第一格 14，`eps_Q` 第一格 12、第 18 格 11。方向一致地指向
+**posterior 仍略微偏窄**，`M` 最明顯。
+
+## I.5 一句話結論
+
+**taper 適用範圍修正把 bounce 8 維校準從全面崩潰（8 個參數 KS p 介於 5×10⁻⁶ 到
+2×10⁻²⁵、90% coverage 0.39–0.49、−8.2σ 到 −10.3σ）改善到大致校準：KS 檢定
+8 個參數全部通過 Bonferroni 校正，`log10_A_bounce`、`log10_dt_bounce_s`、`D_L`、`i`
+四個參數在三個信賴水準上都沒有顯著偏差；但**尚未全部校準良好**——`M` 的 90%
+coverage 是 0.75（−3.46σ，超過 24 個 coverage 檢定的 Bonferroni 門檻 3.078），
+`M` 與 `eps_f` 的 20-bin χ² 均勻性檢定也未通過（p = 0.0042 / 0.0047），
+rank 直方圖在兩端有殘留堆積，方向指向 posterior 仍略微偏窄。**
+
+**依規則如實回報並停止：本輪沒有針對這個殘留的偏窄再做任何修正，
+也沒有調整 `nlive` 或任何取樣設定。**
+
+## I.6 未處理與必須說明的事項
+
+1. **`M` / `eps_f` 的殘留偏窄未處理**，等決定後再動。可能的方向（未驗證、未實作）
+   包含 `nlive` 不足、或還有其他尚未找到的 likelihood／波形議題；本節不做判斷。
+2. **GW150914／GW170814 沒有被重跑**：本環境 `artifacts/gwosc/` 無快取 strain。
+   真實路徑不變是由「同一段程式碼、同一個 0.1」與 regression test 保證的，
+   不是由重跑事件數字保證的。
+3. **`bh_ringdown` 的 mock 校準數字沒有重跑。** 同一個模擬器與 taper 機制也在那條
+   路徑上，先前的數字是在舊行為下取得的；本節不主張它們會如何改變。
+4. **§E.5 的過強結論**已在 §H.5 標註，本節不重複。
+5. 低 SNR 注入（ρ < 2.4）在先驗允許的振幅範圍內本來就沒有可定位的訊號，
+   這是先驗設定的性質，不是本輪的量測問題。
+
+## I.7 產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `docs/calibration/bounce_taperfix_sbc_rank_statistics.csv` | 修正後 N=100 的 8 參數 rank 統計、KS/χ² p 值、三個水準的 coverage 與偏差 | 是 |
+| `docs/calibration/bounce_taper_fix_peak_location_verification.csv` | 8 筆種子走 production 路徑的 taper 解析結果、per-bin ⟨n\|n⟩、argmax 位置與偏移 | 是 |
+| `tests/test_taper_provenance.py` | 15 項 taper provenance 測試 | 是 |
+| `scratchpad/verify_taper_fix.py`, `scratchpad/merge_taperfix.py` | 驗證與合併腳本 | 否 |
