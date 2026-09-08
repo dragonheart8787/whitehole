@@ -9,6 +9,10 @@ SBC/coverage 之前的前置稽核結果。不構成任何白洞訊號偵測或�
 WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是白洞證明器。所有資料皆為
 mock 模擬資料，未使用任何真實 GWOSC 觀測資料。
 
+> **收尾文件（2026-09-08）**：這條工作線的敘事總結、最終校準結果表與已知限制，
+> 見 `docs/BOUNCE_SBC_COVERAGE_REPORT.md`。**本文件仍是逐輪的原始證據紀錄**
+> （Part A–J，內容不因該文件而改寫）；那份是「敘事與結論」，這份是「原始證據」。
+
 **文件狀態（2026-09-06 更新）**：Part A、Part B 是原始紀錄，內容不變——Part B 的
 campaign 當時未執行，因為前置稽核發現了與 `docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md`
 發現 (B)/(D) 同等級的阻斷性問題，依 fail-closed 原則先回報現況與修法選項。
