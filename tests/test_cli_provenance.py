@@ -20,15 +20,41 @@ def test_mock_explicit_provenance():
     assert "strain_rms_used" in data
 
 
-def test_inject_model_defaults_to_fit_model_via_loader():
+def test_inject_model_recorded_in_provenance_via_loader():
+    """The loader records which model was injected.
+
+    Uses a model that declares channel='radio'.  This test previously injected
+    'bh_ringdown' -- a GW model -- into the radio channel, which only "worked"
+    because EMBurstSimulator filled every radio parameter from a silent
+    default.  That fallback is gone (docs/RADIO_PREFLIGHT_AUDIT.md R.4), so the
+    pairing is now made explicit; the assertion is unchanged in intent.
+    """
     _, prov = load_observation_data(
-        "mock", "radio", inject_model="bh_ringdown", seed=1,
+        "mock", "radio", inject_model="magnetar", seed=1,
         context={
             "freq_low_mhz": 400, "freq_high_mhz": 800, "n_freq_chans": 8,
             "n_time_bins": 32, "rng_seed": 1,
         },
     )
-    assert prov.inject_model == "bh_ringdown"
+    assert prov.inject_model == "magnetar"
+
+
+def test_cross_channel_injection_now_fails_closed():
+    """Injecting a GW model into the radio channel raises instead of defaulting.
+
+    _load_mock() does not check that the model's declared channel matches the
+    simulator's, so this pairing is still reachable; what changed is that the
+    simulator no longer invents a burst out of default values for a model that
+    declares none of its parameters.
+    """
+    with pytest.raises(KeyError, match="log10_W_int_ms"):
+        load_observation_data(
+            "mock", "radio", inject_model="bh_ringdown", seed=1,
+            context={
+                "freq_low_mhz": 400, "freq_high_mhz": 800, "n_freq_chans": 8,
+                "n_time_bins": 32, "rng_seed": 1,
+            },
+        )
 
 
 def test_heasarc_fail_closed():

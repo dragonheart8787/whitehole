@@ -43,6 +43,21 @@ from ..utils.constants import K_DM, JY
 from ..utils.math_utils import apply_dm_dispersion, scatter_broaden
 
 
+def _require(params: dict[str, float], key: str) -> float:
+    """Return ``params[key]``, raising with the full key list if absent.
+
+    Deliberately not ``params.get(key, default)``: a silent default turns a
+    parameter-name mismatch into a quantity pinned at a constant that the
+    sampler still believes it is inferring.
+    """
+    if key not in params:
+        raise KeyError(
+            f"EMBurstSimulator requires parameter {key!r}, which the model did "
+            f"not provide. Got parameters: {sorted(params)}"
+        )
+    return float(params[key])
+
+
 class EMBurstSimulator(BaseSimulator):
     """Toy forward simulator for coherent radio burst (FRB-like) signals.
 
@@ -79,9 +94,15 @@ class EMBurstSimulator(BaseSimulator):
         delta_nu_mhz = (freq_high - freq_low) / n_freq
 
         # ── Extract burst parameters ───────────────────────────────────────────
-        W_int_ms = float(10.0 ** params.get("log10_W_int_ms", 1.0))
-        tau_sc_ms_1ghz = float(10.0 ** params.get("log10_tau_sc_ms", 0.0))
-        alpha = float(params.get("spectral_index", -1.5))
+        # Required, not .get(..., default): a model whose parameter is spelled
+        # differently from the key read here used to fall through to the
+        # default silently, pinning the quantity to a constant while the
+        # sampler believed it was inferring it (RADIO_PREFLIGHT_AUDIT.md R.4
+        # measured magnetar's declared 633.658 ms width being simulated as
+        # 10 ms).  Fail closed instead, naming the key that is missing.
+        W_int_ms = float(10.0 ** _require(params, "log10_W_int_ms"))
+        tau_sc_ms_1ghz = float(10.0 ** _require(params, "log10_tau_sc_ms"))
+        alpha = float(_require(params, "spectral_index"))
 
         # Build DM (sum of contributions)
         dm = self._get_dm(params)
@@ -144,18 +165,58 @@ class EMBurstSimulator(BaseSimulator):
 
     @staticmethod
     def _get_dm(params: dict[str, float]) -> float:
-        if "DM_total" in params:
-            return float(params["DM_total"])
-        dm_mw = 100.0
-        dm_igm = params.get("z", 0.0) * 855.0
-        dm_host = params.get("DM_host", 50.0)
-        return dm_mw + dm_igm + dm_host
+        """Total DM, either declared directly or built from its components.
 
-    @staticmethod
-    def _get_fluence(params: dict[str, float]) -> float:
+        Two conventions are supported because the models genuinely differ:
+        ``magnetar`` and ``grb_frb`` declare the total as ``DM``, while
+        ``pbh_tunneling`` decomposes it into ``z`` (IGM) and ``DM_host``.
+        A model that declares neither is a wiring error, not a model with a
+        default DM, so it raises.  ``DM`` was previously spelled ``DM_total``
+        here, which no model declared -- see RADIO_PREFLIGHT_AUDIT.md R.4.
+        """
+        if "DM" in params:
+            return float(params["DM"])
+        if "z" in params and "DM_host" in params:
+            dm_mw = 100.0  # placeholder Milky Way contribution
+            return dm_mw + float(params["z"]) * 855.0 + float(params["DM_host"])
+        raise KeyError(
+            "EMBurstSimulator needs a dispersion measure: either 'DM' (total) "
+            "or both 'z' and 'DM_host'. Got parameters: "
+            f"{sorted(params)}"
+        )
+
+    #: Parameters that let PBHTunnelingWhiteHole derive its own fluence.
+    _PBH_FLUENCE_KEYS = ("log10_M_g", "log10_eta_r", "z",
+                         "log10_W_int_ms", "log10_tau_sc_ms")
+
+    @classmethod
+    def _get_fluence(cls, params: dict[str, float]) -> float:
+        """Burst fluence [Jy ms], from whichever route the model provides.
+
+        ``magnetar`` and ``grb_frb`` declare the fluence directly.
+        ``pbh_tunneling`` does not: its fluence follows from the PBH mass,
+        the radio efficiency and the distance, which is what
+        ``PBHTunnelingWhiteHole.burst_fluence_jy_ms()`` computes.  That
+        function existed but was never called from here, so every
+        pbh_tunneling draw fell through to ``10 ** 0.0 = 1.0 Jy ms`` and
+        log10_M_g / log10_eta_r were exactly dead -- RADIO_PREFLIGHT_AUDIT.md
+        R.3.  A model providing no route at all raises rather than being
+        simulated at a silent 1 Jy ms.
+        """
         if "fluence_jy_ms" in params:
             return float(params["fluence_jy_ms"])
-        return float(10.0 ** params.get("log10_fluence_jy_ms", 0.0))
+        if "log10_fluence_jy_ms" in params:
+            return float(10.0 ** params["log10_fluence_jy_ms"])
+        if all(k in params for k in cls._PBH_FLUENCE_KEYS):
+            from ..models.pbh_tunneling import PBHTunnelingWhiteHole
+
+            return float(PBHTunnelingWhiteHole().burst_fluence_jy_ms(params))
+        raise KeyError(
+            "EMBurstSimulator needs a fluence: either 'fluence_jy_ms', or "
+            "'log10_fluence_jy_ms', or all of "
+            f"{list(cls._PBH_FLUENCE_KEYS)} to derive it. Got parameters: "
+            f"{sorted(params)}"
+        )
 
     # ── Band-averaged pulse ────────────────────────────────────────────────────
 

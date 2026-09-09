@@ -374,3 +374,267 @@ matched-filter SNR（`sqrt(Σs²)/σ`，200 次先驗抽樣）：
 | `docs/calibration/radio_preflight_parameter_activity.csv` | 三個模型全部宣告參數的擾動前後資料變化、`ΔlnL`、活性旗標 | 是 |
 | `docs/calibration/radio_preflight_signal_strength.csv` | 三個模型在自身先驗下的 fluence、峰值、matched-filter SNR 分位數 | 是 |
 | `scratchpad/radio_audit.py`, `scratchpad/radio_audit2.py` | 稽核腳本（只讀 production 模組） | 否 |
+
+---
+
+# 修正輪：R.4 / R.3（機械部分）/ R.5 對齊，與 R.6 尺度診斷（2026-09-09）
+
+> 本節記錄一次 **production 修正**（`simulators/em_burst.py`、`models/alternatives.py`、
+> `likelihoods/em_likelihood.py`）與一次**純診斷**（R.6，未修正任何東西）。
+> 沒有跑任何 SBC/campaign。本節不含任何天文物理宣稱。
+
+## R.11 修正內容
+
+### R.11.1 R.4：統一參數名稱，並讓模擬器 fail-closed
+
+**命名方向是逐項按「改動面積最小」決定的，不是一律偏向某一邊：**
+
+| 不一致 | 統一成 | 改在哪一邊 | 理由 |
+|---|---|---|---|
+| `log10_W_ms`（magnetar） vs `log10_W_int_ms`（模擬器 + pbh） | **`log10_W_int_ms`** | 模型 | 模擬器與 `pbh_tunneling` 已經用這個名字；改模擬器要連帶動 pbh 模型、config、conftest、likelihood 清單 |
+| `spectral_index_radio`（grb） vs `spectral_index`（模擬器 + pbh + magnetar） | **`spectral_index`** | 模型 | 三者中已有兩個模型用這個名字 |
+| `DM`（magnetar + grb） vs `DM_total`（模擬器） | **`DM`** | **模擬器** | `DM_total` **沒有任何模型宣告過**，只出現在 summary-stat 的輸出鍵；改模擬器一行即可 |
+
+模擬器端 `params.get(key, default)` 改為明確要求：
+
+- 新增 `_require(params, key)`，缺鍵時 `KeyError` 並列出實際收到的參數。
+- `log10_W_int_ms`、`log10_tau_sc_ms`、`spectral_index` 改用 `_require`。
+- `_get_dm()`：接受 `DM`（總量）或 `z` + `DM_host`（分解式，pbh 用），兩者皆無則 raise。
+  **保留兩種慣例是刻意的**，因為模型本身就分成這兩類。
+- `_get_fluence()`：`fluence_jy_ms` → `log10_fluence_jy_ms` → pbh 推導路徑 → raise。
+
+修正後的活性實測（同 §R.2 方法）：
+
+| 模型 | 參數 | 修正前 `max|Δdata|` | 修正後 |
+|---|---|---|---|
+| `magnetar` | `log10_W_int_ms`（原 `log10_W_ms`） | **0** | **0.362274** |
+| `magnetar` | `DM` | **0** | **1.37282×10⁻³** |
+| `magnetar` | `spectral_index` | 6.33647×10⁻² | 3.81739×10⁻³ |
+| `pbh_tunneling` | `log10_M_g` | **0** | 3.09296×10⁻⁸ |
+| `pbh_tunneling` | `log10_eta_r` | **0** | 5.03544×10⁻⁷ |
+
+`magnetar` 五個取樣參數現在全部同時影響資料與 lnL。`pbh_tunneling` 的兩個
+fluence 參數從「精確為 0」變成「有作用但極小」——極小的原因是 R.6，不是接線。
+
+### R.11.2 R.3（機械部分）：接上 `burst_fluence_jy_ms()`
+
+`EMBurstSimulator._get_fluence()` 現在會在模型提供
+`log10_M_g` / `log10_eta_r` / `z` / `log10_W_int_ms` / `log10_tau_sc_ms` 全部五個鍵時，
+呼叫 `PBHTunnelingWhiteHole().burst_fluence_jy_ms(params)`，取代原本的
+`10**0.0 = 1.0 Jy·ms`。派發方式沿用該模組既有的「依參數是否存在」慣例
+（`_get_dm()` 本來就是這樣寫的），不引進新的模型判斷機制。
+
+同時把 `log10_f_pbh` 與 `log10_k_tunnel` 從
+`RadioBurstLikelihood("pbh_tunneling").parameter_names` 移除——它們是**事件率／壽命**
+參數，決定這種事件多久發生一次，不決定單一爆發長什麼樣，單一動態頻譜對它們沒有資訊。
+做法比照 `BOUNCE_PREFLIGHT_AUDIT.md` B3-3：**模型的完整宣告不變**，只是這條通道的
+取樣維度對齊 likelihood 真正用得到的參數。取樣維度因此從 9 降為 **7**。
+
+### R.11.3 R.5：`RadioBurstLikelihood.parameter_names` 改為逐模型明確分支
+
+原本只處理 `null` 與 `pbh_tunneling`，其餘一律回傳 magnetar 清單。現在每個模型都有
+自己的分支，**未涵蓋的模型 raise `ValueError`** 而不是繼承別人的參數。
+
+`grb_frb` 的清單是「模型宣告 ∩ 模擬器實際使用」= `log10_fluence_jy_ms`,
+`spectral_index`, `DM`。`effective_parameter_names()` 不再拋 `ValueError`。
+
+**兩點與任務指示不同，必須說明：**
+
+1. **`z` 沒有被放進 `grb_frb` 的取樣清單。** 稽核當時 `z` 會影響資料，是因為
+   `grb_frb` 宣告的 `DM` 名字對不上，`_get_dm()` 落到分解式分支才用到 `z`。
+   命名統一之後 `_get_dm()` 直接取 `DM` 總量，**`z` 在這個模擬器裡已經沒有任何管道**
+   影響動態頻譜（模擬器只在 DM 這一處用到 z）。把一個已量測為死的參數放進取樣維度，
+   正是 B3-3／R.3 要避免的事，所以沒有放。**若希望 `z` 有作用，需要決定它應該
+   怎麼進入前向模型（例如宇宙學紅移對頻譜或 fluence 的影響），那是建模決策，本輪不做。**
+2. **`log10_W_ms` / `log10_tau_sc_ms` 沒有被放進 `grb_frb` 的清單**，因為
+   `GRBAfterglowFRB` **根本沒有宣告寬度或散射參數**（它只有 `log10_T90_s`）。
+   放進去會讓 `effective_parameter_names()` 再次拋 `ValueError`。見 §R.12。
+
+### R.11.4 測試
+
+新增 `tests/test_radio_forward_model.py`（33 項）：名稱共享、缺鍵 fail-closed、
+每個取樣參數擾動後資料與 lnL 都會動、pbh fluence 等於模型推導值（`rel=1e-12`）、
+三個模型的 `effective_parameter_names()` 結果、未知模型 raise、grb 仍不可模擬的
+現況鎖定。
+
+`tests/test_cli_provenance.py` 有一項需要調整，見 §R.12.3。
+
+**pytest：247 passed, 1 skipped, 1 deselected**（基準 `919e1d3` 是 213 passed，
+差額 +34 = 33 項新測試 + 1 項新的跨通道測試；**沒有非預期 regression**）。
+
+---
+
+## R.12 修正過程中浮現的新問題（如實回報，未處理）
+
+### R.12.1 `GRBAfterglowFRB` 沒有宣告任何寬度或散射參數
+
+模擬器需要 `log10_W_int_ms` 與 `log10_tau_sc_ms`，`grb_frb` 兩個都沒有——它只有
+`log10_T90_s`（先驗 `uniform(-3, 3)`，即 1 ms 到 1000 s）。fail-closed 之後：
+
+```
+KeyError: EMBurstSimulator requires parameter 'log10_W_int_ms', which the model
+did not provide. Got parameters: ['DM', 'log10_T90_s', 'log10_fluence_jy_ms',
+'spectral_index', 'z']
+```
+
+**`grb_frb` 仍然不能在這條通道上被模擬**，但失敗點從「likelihood 要了三個不存在的
+參數」變成「模型缺少前向模型需要的寬度參數」，而且錯誤訊息直接指名缺什麼。
+
+把 `log10_T90_s`（秒）當成脈衝寬度是一個看似自然的對應，但它的先驗上界 1000 s
+對一個電波爆發寬度而言不合理，**要不要這樣對應、先驗要不要跟著改，是建模決策，
+本輪不做也不建議。**
+
+### R.12.2 `_load_mock()` 不檢查模型宣告的通道與模擬器是否相符
+
+`dataio/loader.py::_load_mock()` 會把**任何**模型丟給**任何**通道的模擬器。
+修正前這被預設值遮蔽（把 GW 模型 `bh_ringdown` 注入 radio 通道，會產生一個
+W=10 ms、DM=150、α=−1.5、fluence=1 Jy·ms 的爆發）；fail-closed 之後會 raise。
+
+**要不要在 `_load_mock()` 加通道相容性檢查，是設計決策，本輪不做。**
+
+### R.12.3 因此調整的既有測試
+
+`tests/test_cli_provenance.py::test_inject_model_defaults_to_fit_model_via_loader`
+原本就是把 `bh_ringdown` 注入 radio 通道，只斷言 provenance 記錄了
+`inject_model`。它之所以能通過，**完全依賴 R.4 那個被移除的靜默預設行為**。
+
+處理方式：改名為 `test_inject_model_recorded_in_provenance_via_loader` 並改用
+同通道的 `magnetar`（斷言意圖不變），另外新增
+`test_cross_channel_injection_now_fails_closed` 把新行為鎖住。
+**這是唯一一項既有測試的修改**，理由與新行為都寫在測試的 docstring 裡。
+
+### R.12.4 次像素寬度的脈衝會整個消失，不只是「無法解析」
+
+§R.7 記錄了 `log10_W_int_ms` 有 11.88% 的抽樣低於一個時間格。撰寫測試時實測到
+一個更強的後果：時間軸 `linspace(-t_start, t_end, n_time)` **不一定包含 t = 0**，
+而脈衝恆定置中在 t = 0。當 σ_t 遠小於格寬時，最近的取樣點落在
+`exp(-0.5 (Δt/σ_t)²)` 的極遠尾巴上——實測一組 `W_obs = 0.1525 ms`、格寬 2.353 ms
+的設定，訊號在浮點下**精確為 0**（`data − noise_realisation` 全 0）。
+也就是說那 11.88% 不只是「解析不出來」，而是可能**完全沒有訊號被注入**。
+本輪未處理，僅記錄為 §R.7 的加強版。
+
+---
+
+## R.13 R.6 診斷：`burst_fluence_jy_ms()` 的獨立尺度檢查（未修正）
+
+**這是純診斷。沒有修改這個函式，也沒有調整任何先驗。**
+
+### R.13.1 逐項單位核對
+
+以 `M = 10¹⁵ g`、`η_r = 10⁻³`、`z = 0.1` 逐步重算，與函式輸出比對：
+
+| 步驟 | 值 |
+|---|---|
+| `M_g × 1e-3` | 1.000000×10¹² kg |
+| `E_tot = M c²` | 8.987552×10²⁸ J |
+| `η_r · E_tot` | 8.987552×10²⁵ J |
+| `D_L(z = 0.1)` | 477.522094 Mpc = 1.473479×10²⁵ m |
+| `4π D_L²` | 2.728336×10⁵¹ m² |
+| `η_r E / (4π D_L² Δν)` | 3.294151×10⁻³⁵ J m⁻² Hz⁻¹ |
+| `/ (JY × 1e-3)` | 3.294151×10⁻⁶ Jy·ms |
+| **函式回傳** | **3.294151×10⁻⁶ Jy·ms** |
+
+逐項檢查結果：
+
+- `M_g`（克）→ kg 的 `1e-3` **正確**。
+- `E = Mc²` 用的 `C = 2.997925×10⁸ m/s` **正確**。
+- `1 Jy·ms = 10⁻²⁶ W m⁻² Hz⁻¹ × 10⁻³ s = 10⁻²⁹ J m⁻² Hz⁻¹`，程式除以
+  `JY × 1e-3 = 1.000000×10⁻²⁹` **正確**。
+- `_dl_mpc()` 用 `H0 = 67.4`、`Ω_m = 0.315`、`Ω_Λ = 0.685` 的平坦 ΛCDM 梯形積分，
+  z = 0.1 給 477.52 Mpc，與標準 Planck-類宇宙學的 ~475 Mpc 差 <1%，**正確**。
+
+**在我檢查的範圍內，沒有找到任何單位換算錯誤。**
+
+### R.13.2 但有兩項建模假設值得標注（都不是數量級來源）
+
+1. **`W_obs_ms` 在函式內被計算，但完全沒有出現在回傳式裡。** 這是死程式碼。
+   對「fluence」（時間積分量）而言與寬度無關本來就是對的物理，所以這不影響數值，
+   但計算了卻不用是誤導性的。
+2. **`Δν` 被寫死成 1 GHz**，等於假設整個靜止質量能量平攤在 1 GHz 頻寬上；
+   而且式子裡**沒有任何 (1+z) 因子**。這兩項合起來的影響是「幾倍」等級，
+   不是「幾個數量級」等級。
+
+### R.13.3 樂觀角落：先驗其實包含可偵測的組合
+
+把 `M_g`、`η_r` 取先驗上界、`z` 取先驗下界（最有利組合）：
+
+| 量 | 值 |
+|---|---|
+| 最樂觀角落 | `log10_M_g = 16`, `log10_eta_r = 0`, `z = 1e-4` |
+| 該處 fluence | **3.796142×10⁴ Jy·ms** |
+| vs CHIME 下限 0.4 Jy·ms | 比值 9.49×10⁴（**+4.98 dex**） |
+| vs CHIME 中位 4 Jy·ms | 比值 9490（**+3.98 dex**） |
+| vs CHIME 上限 7 Jy·ms | 比值 5423（**+3.73 dex**） |
+
+**先驗的樂觀端比 CHIME 門檻高 3.7–5.0 個數量級**，不是低。所以「比門檻低 7 個數量級」
+描述的是**中位數**，不是先驗的可達範圍。
+
+### R.13.4 哪個先驗主導這 7 個數量級
+
+`fluence ∝ η_r · M / D_L(z)²`，取對數後是
+`log10_eta_r + log10_M_g − 2 log10 D_L(z) + 常數`。20000 次抽樣：
+
+| 項 | 先驗跨度 | 與 log10 fluence 的 Pearson r | log 變異數貢獻 |
+|---|---|---|---|
+| `log10_eta_r` | **9.999 dex** | **+0.6915** | **8.2685** |
+| `log10_z` | 4.698 dex | −0.6955 | 1.8571 |
+| `log10_M_g` | 3.000 dex | +0.2044 | 0.7568 |
+
+log10 fluence：中位數 **−6.670**，p1 −15.776、p99 **+1.971**，全距 −17.866 到 +4.479。
+
+**主導者是 `log10_eta_r` 的 `uniform(-10, 0)`——10 個數量級的無線電輻射效率先驗。**
+它的變異數貢獻是第二名（z）的 4.5 倍、第三名（M_g）的 11 倍。
+
+### R.13.5 SNR ≥ 8 那個尾端的參數組合合不合理
+
+20000 次抽樣中 90 筆（0.450%）達到 SNR ≥ 8：
+
+| 參數 | 尾端中位數 | 先驗中位數 | 尾端範圍 |
+|---|---|---|---|
+| `log10_M_g` | +15.61 | +14.51 | [+14.59, +15.99] |
+| `log10_eta_r` | **−0.4471** | −4.973 | [−1.713, −0.005398] |
+| `z` | **1.773×10⁻⁴** | 2.182×10⁻² | [1.01×10⁻⁴, 6.753×10⁻⁴] |
+
+尾端的 fluence 是 362.7 – 3.014×10⁴ Jy·ms。
+
+**這個尾端在物理上是極端的**：`η_r` 中位數 −0.447 表示把約 **36% 的 PBH 靜止質量能量**
+轉成同調無線電輻射；`z ≈ 1.8×10⁻⁴` 對應 D_L ≈ 0.79 Mpc，即本星系群之內。
+
+換個角度，固定在先驗最大質量與**最大可能效率 η_r = 1**，可偵測距離上限是：
+
+| 門檻 | 最大 z | 對應 D_L |
+|---|---|---|
+| 0.4 Jy·ms | 0.030123 | 137.0 Mpc |
+| 4 Jy·ms | 0.0096714 | 43.33 Mpc |
+| 7 Jy·ms | 0.0073238 | 32.76 Mpc |
+
+把效率降到比較不極端的 `η_r = 10⁻³`：0.4 Jy·ms 只到 z = 9.74×10⁻⁴（4.33 Mpc）、
+4 Jy·ms 只到 z = 3.08×10⁻⁴（1.37 Mpc）。
+
+**「若要讓模型在 CHIME 靈敏度內產生可偵測訊號，需要什麼範圍」的量化答案**
+（只是資訊，不代表應該調整先驗）：在 `η_r ≤ 1`、`M ≤ 10¹⁶ g` 的物理上界下，
+`z` 需落在 **≲ 0.01–0.03**（現行 `log_uniform(1e-4, 5)` 先驗中約
+42% 的質量在 z < 0.0097 以下）；若同時要求 `η_r` 落在較保守的 10⁻³ 附近，
+則 `z` 需 **≲ 10⁻³**（約 21% 的先驗質量）。
+從參考點（M = 10¹⁴·⁵ g、η_r = 10⁻⁵、z = 0.1，fluence 1.042×10⁻⁸ Jy·ms）
+到 1 Jy·ms 需要 **+7.98 dex**。
+
+### R.13.6 一句話結論
+
+**在本輪檢查範圍內沒有找到任何具體的單位換算錯誤——四項換算（g→kg、`Mc²`、
+Jy·ms→J m⁻² Hz⁻¹、平坦 ΛCDM 的 `D_L`）逐項重算都與函式輸出一致到有效位數，
+而先驗的最樂觀角落給出 3.796×10⁴ Jy·ms、比 CHIME 門檻高 3.7–5.0 個數量級——
+所以這次檢查**傾向支持「這反映的是先驗範圍本身的選擇」而不是公式／單位問題**，
+主導者是 `log10_eta_r` 的 `uniform(-10, 0)`（log 變異數貢獻 8.27，是第二名的 4.5 倍）。**
+
+需要一併說明的保留：函式裡 `W_obs_ms` 計算後未使用、`Δν` 寫死 1 GHz、
+沒有 (1+z) 因子——這三項都是建模假設而非算術錯誤，影響量級是「幾倍」，
+無法解釋 7 個數量級的落差，但它們是否符合意圖仍需要作者確認。
+**本節沒有修改這個函式，也沒有調整任何先驗。**
+
+## R.14 本輪產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `tests/test_radio_forward_model.py` | 33 項 radio forward-model 對齊 regression 測試 | 是 |
+| `scratchpad/fluence_scale_diag.py` | R.6 尺度診斷腳本（只讀 production 模組） | 否 |

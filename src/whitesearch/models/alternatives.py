@@ -57,11 +57,15 @@ class MagnetarFlare(BaseModel):
                 latex=r"$\log_{10}\mathcal{F}$",
             ),
             ParameterSpec(
-                name="log10_W_ms",
+                # Named for the key EMBurstSimulator reads and pbh_tunneling
+                # already declares.  Was 'log10_W_ms', which the simulator
+                # never saw, so the width was silently pinned at 10 ms --
+                # docs/RADIO_PREFLIGHT_AUDIT.md R.4.
+                name="log10_W_int_ms",
                 prior_type="uniform",
                 prior_kwargs={"low": -1.0, "high": 3.0},
                 unit="log10(ms)",
-                description="Log10 observed burst width",
+                description="Log10 intrinsic burst width",
                 latex=r"$\log_{10} W$",
             ),
             ParameterSpec(
@@ -109,7 +113,7 @@ class MagnetarFlare(BaseModel):
     def summary_stats(self, params: dict[str, float]) -> dict[str, float]:
         return {
             "fluence_jy_ms": 10.0 ** params["log10_fluence_jy_ms"],
-            "W_ms": 10.0 ** params["log10_W_ms"],
+            "W_ms": 10.0 ** params["log10_W_int_ms"],
             "DM": params["DM"],
             "tau_sc_ms": 10.0 ** params["log10_tau_sc_ms"],
             "spectral_index": params["spectral_index"],
@@ -153,7 +157,10 @@ class GRBAfterglowFRB(BaseModel):
                 latex=r"$z$",
             ),
             ParameterSpec(
-                name="spectral_index_radio",
+                # Same rename as magnetar's width, for the same reason: the
+                # simulator reads 'spectral_index', so 'spectral_index_radio'
+                # was never seen -- docs/RADIO_PREFLIGHT_AUDIT.md R.4.
+                name="spectral_index",
                 prior_type="normal",
                 prior_kwargs={"mean": -0.6, "std": 0.5},
                 unit="dimensionless",
@@ -175,7 +182,7 @@ class GRBAfterglowFRB(BaseModel):
             "fluence_jy_ms": 10.0 ** params["log10_fluence_jy_ms"],
             "T90_s": 10.0 ** params["log10_T90_s"],
             "z": params["z"],
-            "spectral_index_radio": params["spectral_index_radio"],
+            "spectral_index_radio": params["spectral_index"],
             "DM": params["DM"],
         }
 
