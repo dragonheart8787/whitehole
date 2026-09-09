@@ -17,6 +17,28 @@ from .base import BaseModel, ParameterSpec
 from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
 
 
+# EHT imaging grid this project analyses, from configs/instruments/eht.yaml ->
+# imaging.{fov_muas, n_pixels}, which are also what cli.py's default image
+# context is built from.  tests/test_image_forward_model.py asserts these
+# against that file, so the YAML stays the source of truth without a model
+# doing import-time file IO (same convention as BAND_LOW_HZ/BAND_HIGH_HZ on the
+# GW side).
+IMAGE_FOV_MUAS = 200.0
+IMAGE_N_PIXELS = 128
+IMAGE_PIXEL_MUAS = 2.0 * IMAGE_FOV_MUAS / IMAGE_N_PIXELS  # 3.1250 muas
+
+# Smallest ring radius, in pixels, at which the Gaussian annulus is sampled
+# well enough that its peak survives for EVERY ring_width_frac the prior allows.
+# Measured, not assumed: _gaussian_ring_image() puts the ring at
+# exp(-0.5 ((r_grid - r_ring) / (r_ring * ring_width_frac))^2), so a thin ring
+# (frac = 0.01) is missed entirely unless a grid point lands close to r_ring.
+# Sweeping frac over [0.01, 0.5] the worst case first exceeds half the peak
+# brightness at 8.245 pixels; below that the response is not even monotonic in
+# r (worst case 0.1217 at 3 px, 0.0003 at 4 px, 0.9749 at 5 px) because it
+# depends on whether r_ring happens to be commensurate with the pixel grid.
+RING_RADIUS_MIN_PIXELS = 8.245
+
+
 class GREternalWhiteHole(BaseModel):
     """Parametric GR eternal white hole with Schwarzschild/Kerr geometry.
 
@@ -35,6 +57,46 @@ class GREternalWhiteHole(BaseModel):
 
     def __init__(self, include_charge: bool = False) -> None:
         self.include_charge = include_charge
+
+    @classmethod
+    def ring_radius_representable_range_muas(
+        cls,
+        fov_muas: float = IMAGE_FOV_MUAS,
+        n_pixels: int = IMAGE_N_PIXELS,
+    ) -> tuple[float, float]:
+        """Ring radii the image grid can actually represent, in μas.
+
+        Lower bound: ``RING_RADIUS_MIN_PIXELS`` pixels, the point at which the
+        annulus peak survives for every ``ring_width_frac`` in the prior.
+        Upper bound: the field half-width, beyond which the ring leaves the
+        image entirely.  At the shipped 200 μas / 128 px geometry this is
+        ``[25.77, 200.0]`` μas -- a window of only 0.89 dex.
+
+        NOT CURRENTLY USED TO SET THE PRIOR, deliberately.  The image
+        constrains the ring radius, which depends on ``M`` and ``D_L`` only
+        through the ratio ``r ∝ M / D_L`` (numerically
+        ``r[μas] = 5.130245e-08 * M[M_sun] / D_L[Mpc]``).  With independent
+        log-uniform priors the radius therefore spans
+        ``dex(M) + dex(D_L)``: 4.000 + 3.301 = 7.301 dex against a window of
+        0.89-1.20 dex, so only 18.29% of prior draws land inside it and 80.98%
+        fall below one pixel and produce an exactly-zero image.
+
+        Forcing ~100% representability by narrowing both priors would require
+        ``dex(M) + dex(D_L) <= 1.204`` -- for instance a factor of 4 in mass AND
+        a factor of 4 in distance.  That is narrower than the sources this
+        channel exists to describe: M87* (6.5e9 M_sun at 16.8 Mpc) and Sgr A*
+        (4.15e6 M_sun at 0.008178 Mpc) differ by 3.19 dex in mass and 3.31 dex
+        in distance, yet both sit at r = 19.7 and 25.8 μas because the two
+        co-vary.  Narrowing the marginals cannot express that correlation.
+
+        The structural fix is a reparameterisation onto the ratio the data
+        constrains -- the analogue of the burst-delay reparameterisation in
+        BOUNCE_PREFLIGHT_AUDIT.md B3-2 -- which is a design decision, not a
+        mechanical narrowing.  Recorded in docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md
+        X.6 and X.11.1.
+        """
+        pixel_muas = 2.0 * float(fov_muas) / int(n_pixels)
+        return (RING_RADIUS_MIN_PIXELS * pixel_muas, float(fov_muas))
 
     def parameters(self) -> list[ParameterSpec]:
         params = [

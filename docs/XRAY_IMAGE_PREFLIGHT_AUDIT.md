@@ -333,3 +333,129 @@ likelihood 正確排除，不是問題。
 |---|---|---|
 | `docs/calibration/xray_image_preflight_parameter_activity.csv` | 四個模型-通道組合全部宣告參數的擾動前後資料變化、`ΔlnL`、活性旗標（無條件抽樣版） | 是 |
 | `scratchpad/xi_audit.py` | 稽核腳本（只讀 production 模組） | 否 |
+
+---
+
+# X.11 image 通道修正輪（2026-09-09）
+
+> 本節記錄一次 **production 修正**（`likelihoods/visibility.py`、
+> `models/gr_eternal.py`、`cli.py`）。**範圍限定 image 通道，沒有動 xray 的任何程式碼。**
+> 沒有跑任何 SBC/campaign。本節不含任何天文物理宣稱。
+
+## X.11.1 X.6 環半徑先驗：**先驗未收窄，回報 tension**
+
+### 可表示範圍的推導（已進程式碼）
+
+新增 `IMAGE_FOV_MUAS` / `IMAGE_N_PIXELS` / `IMAGE_PIXEL_MUAS`（引用
+`configs/instruments/eht.yaml` 的 `imaging.{fov_muas, n_pixels}`，並由
+`tests/test_image_forward_model.py` 斷言與該 YAML 一致），以及
+`GREternalWhiteHole.ring_radius_representable_range_muas()`
+（比照 bounce 的 `_m_prior_bounds_for_band()`）。
+
+**下界不是「一個像素」那麼簡單。** `_gaussian_ring_image()` 產生的是
+`exp(-0.5 ((r_grid − r_ring)/(r_ring · ring_width_frac))²)`，所以薄環
+（`ring_width_frac = 0.01`）只有在某個網格點剛好落在 `r_ring` 附近時才會被取到。
+掃描 `ring_width_frac ∈ [0.01, 0.5]` 的最壞情況（實測，brightness = 1）：
+
+| `r_ring` | frac=0.01 | 0.03 | 0.1 | 0.3 | 0.5 |
+|---|---|---|---|---|---|
+| 1 μas | 0 | 0 | 2×10⁻³³ | 2.33×10⁻⁴ | 0.0492 |
+| 3.125 μas（1 像素） | 5.4×10⁻¹⁸⁰ | 1.21×10⁻²⁰ | 0.0161 | 0.632 | 0.848 |
+| 6 μas | 1×10⁻²⁸ | 7.74×10⁻⁴ | 0.525 | 0.931 | 0.975 |
+| 12 μas | 0.998 | 1 | 1 | 1 | 1 |
+| 25 μas | 0.923 | 0.991 | 0.999 | 1 | 1 |
+
+**而且它不是單調的**：最壞情況在 3 像素是 0.1217、4 像素掉到 0.0003、5 像素回到
+0.9749——取決於 `r_ring` 是否與像素網格可公度。這是**取樣假影**，不是平滑的解析度極限。
+最壞情況首次穩定超過半個峰值是在 **8.245 像素 = 25.77 μas**，這就是採用的下界；
+上界是 FoV 半寬 200 μas。**可表示視窗只有 0.89 dex。**
+
+### 為什麼沒有收窄先驗
+
+影像約束的是環半徑，而環半徑只透過**比值**依賴 `M` 與 `D_L`：
+
+```
+r[μas] = 5.130245e-08 * M[M_sun] / D_L[Mpc]
+```
+
+獨立的 log-uniform 先驗下，`r` 的跨度是 `dex(M) + dex(D_L)` = 4.000 + 3.301 =
+**7.301 dex**，對上 0.89–1.20 dex 的視窗。要達到 ~100% 可表示率，需要
+`dex(M) + dex(D_L) ≤ 1.204`，例如**質量與距離各只能跨一個 4 倍區間**。
+
+| 若 `M` 跨 | 則 `D_L` 只能跨 |
+|---|---|
+| 0.00 dex（×1） | 1.20 dex（×16） |
+| 0.30 dex（×2） | 0.90 dex（×8.02） |
+| 0.60 dex（×3.98） | 0.60 dex（×4.02） |
+| 0.90 dex（×7.94） | 0.30 dex（×2.01） |
+
+**這比這條通道存在的理由本身還窄。** 用程式碼自己的公式算兩個實際 VLBI 目標：
+
+| 目標 | `M` | `D_L` | 環半徑 |
+|---|---|---|---|
+| M87* | 6.5×10⁹ M⊙ | 16.8 Mpc | **19.667 μas** |
+| Sgr A* | 4.15×10⁶ M⊙ | 0.008178 Mpc | **25.795 μas** |
+
+兩者質量差 **3.19 dex**、距離差 **3.31 dex**，環半徑卻都在 20–26 μas——
+因為兩者共變。**收窄邊際先驗無法表達這個相關性。**
+
+**額外發現（比 tension 更尖銳）**：推導出的下界 25.77 μas **高於 M87\* 的
+19.67 μas**。也就是說，目前出貨的成像網格連這條通道最主要的目標都無法忠實表示
+（對薄環而言）；Sgr A* 的 25.80 μas 也只是剛好擦過下界。
+
+**依指示不硬縮先驗。** 結構性的修法是把參數化改到資料真正約束的比值上
+（比照 `BOUNCE_PREFLIGHT_AUDIT.md` B3-2 的爆發時序重新參數化），
+那是設計決策，本輪不做。推導與這段理由都寫進
+`ring_radius_representable_range_muas()` 的 docstring，測試把視窗、
+與 YAML 的一致性、以及**目前僅 18.29% 可表示**這個現況都鎖住——
+後者標明是 KNOWN DEFICIENCY，若日後重新參數化落地，該測試**應該**失敗並被主動更新。
+
+## X.11.2 X.8.1 修正：`uv_coverage` 改為從資料取得，缺少則 fail-closed
+
+`VisibilityLikelihood.loglike()` 現在用
+`_require_uv_coverage(meta, context)` 取得基線：優先讀資料 metadata，
+其次讀 context，兩者皆無則 `KeyError`。取得後**複製一份 context** 並塞入
+`uv_coverage` 再交給 `ImageShadowSimulator`，所以模型可見度一定建在資料自己的
+(u, v) 點上。（複製而非就地修改，測試 `test_context_is_not_mutated` 鎖住。）
+
+原本的 `context.get("uv_coverage", _default_eht_uv())` 會在資料基線與預設不同時，
+把模型與資料在不同 (u, v) 點上逐項相減——GW B.4 那類 forward-model 不一致的
+image 版本。
+
+## X.11.3 X.8.2 修正：closure phase 不再安靜退化
+
+- `use_closure_phases=True`（預設）現在代表**呼叫端聲明資料帶有 closure phase**，
+  缺鍵時 `KeyError` 並提示改用 `use_closure_phases=False`。
+- `use_closure_phases=False` 是**明確聲明的 amplitude-only 分析**。
+- 兩種情況都寫進 `self.last_closure_config`：
+  `used_closure_phase` / `reason` / `n_closure_phases`（比照 GW 的
+  `last_taper_config`）。
+
+## X.11.4 X.4 修正：`null` 已接上；`bh_accretion` 回報 trade-off，未實作
+
+`VisibilityLikelihood` 現在接受 `model_name`（預設 `"gr_eternal"`），
+並加上 `if self.model_name == "null": return []` 分支——
+`GWLikelihood`、`RadioBurstLikelihood`、`XRayBurstLikelihood` 之外的每一條
+通道都有這個分支，而整個專案的輸出是 ln BF vs null，**所以 null 必須能在
+每條通道上被擬合，設計意圖明確**。`cli.py` 改為 `VisibilityLikelihood(model)`。
+`gr_eternal` 的 7 維取樣維度完全不變。
+
+**`bh_accretion` 沒有實作，因為它不是接線問題。** 設計意圖是明確的
+（它宣告 `channel = "image"`，且 `cli.py::_default_alt_model` 把 image 對到它），
+但它宣告的是 `log10_mdot_edd` / `jet_power_frac`，而**沒有**
+`position_angle` / `ring_width_frac` / `log10_brightness`。三個選項的 trade-off：
+
+| 選項 | 做法 | 代價 |
+|---|---|---|
+| **A** 交集分支 | `["M", "a_star", "D_L", "i"]`，比照 R.5 對 grb_frb 的做法 | 缺的三個幾何參數會落到模擬器預設值（0 / 0.1 / 1.0）——**正是 R.4 的靜默預設模式**；而且 `log10_mdot_edd` / `jet_power_frac` 仍然是死的，`bh_accretion` 變成「凍結三個幾何參數的 `gr_eternal`」，不是一個物理上不同的對立假說 |
+| **B** 讓模型補宣告三個幾何參數 | 一樣機械 | `bh_accretion` 在 likelihood 眼中會與 `gr_eternal` **完全相同**，ln BF(WH/accretion) 恆等於 0，對立假說失去意義 |
+| **C** 擴充 `ImageShadowSimulator` | 讓 `log10_mdot_edd` / `jet_power_frac` 真的驅動一個吸積盤亮度分布 | 唯一在物理上有意義的路徑，但是實質的建模工作，不是機械修正 |
+
+**依指示回報現況與選項，未自行選定。** 測試
+`test_bh_accretion_still_cannot_build_priors` 把現況鎖住並在 docstring 說明原因。
+
+## X.11.5 產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `tests/test_image_forward_model.py` | 16 項 image 通道對齊與 fail-closed 測試 | 是 |

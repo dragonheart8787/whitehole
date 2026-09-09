@@ -28,8 +28,15 @@ class VisibilityLikelihood(BaseLikelihood):
     where κ is estimated from S/N.
     """
 
+    #: Parameters the ring model in ImageShadowSimulator actually reads.
+    RING_PARAMETERS = [
+        "M", "a_star", "D_L", "i", "position_angle",
+        "ring_width_frac", "log10_brightness",
+    ]
+
     def __init__(
         self,
+        model_name: str = "gr_eternal",
         use_closure_phases: bool = True,
         closure_kappa: float = 10.0,
         robust_data: bool = False,
@@ -37,23 +44,34 @@ class VisibilityLikelihood(BaseLikelihood):
         """
         Parameters
         ----------
+        model_name : str
+            Which model's parameters to report from ``parameter_names``.  Added
+            so the null hypothesis can be fit on this channel at all: every
+            other channel's likelihood has a "null" branch, and without one the
+            intersection check refused to build priors for it.  See
+            docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.4.
         use_closure_phases : bool
-            Include closure phase likelihood (insensitive to station gains).
+            Include the closure-phase term.  True means the caller asserts the
+            data carries closure phases, and their absence is an error rather
+            than a silent fallback to amplitude-only; pass False to declare an
+            amplitude-only analysis deliberately.
         closure_kappa : float
             von Mises concentration parameter κ (higher = tighter around μ).
         robust_data : bool
             Use Student-t likelihood for visibility amplitudes (outlier robust).
         """
+        self.model_name = model_name
         self.use_closure = use_closure_phases
         self.kappa = closure_kappa
         self.robust = robust_data
+        #: Provenance of the most recent evaluation's closure-phase decision.
+        self.last_closure_config: dict[str, Any] = {}
 
     @property
     def parameter_names(self) -> list[str]:
-        return [
-            "M", "a_star", "D_L", "i", "position_angle",
-            "ring_width_frac", "log10_brightness",
-        ]
+        if self.model_name == "null":
+            return []
+        return list(self.RING_PARAMETERS)
 
     def loglike(
         self,
@@ -82,9 +100,17 @@ class VisibilityLikelihood(BaseLikelihood):
         if "sigma" in meta:
             sigma_arr = np.asarray(meta["sigma"], dtype=float)
 
-        # Build model visibilities
+        # Build model visibilities ON THE DATA'S OWN BASELINES.  Previously the
+        # observation's uv_coverage was never forwarded, so ImageShadowSimulator
+        # fell back to _default_eht_uv() and the model was sampled at different
+        # (u, v) points from the data it was being differenced against.  That did
+        # not bite only because the mock record happens to reuse the default
+        # coverage; any real uvfits would.  See
+        # docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.8.1.
+        model_context = dict(context)
+        model_context["uv_coverage"] = self._require_uv_coverage(meta, context)
         sim = ImageShadowSimulator()
-        sim_data = sim.simulate(theta, context, rng=np.random.default_rng(0))
+        sim_data = sim.simulate(theta, model_context, rng=np.random.default_rng(0))
         model_vis = np.asarray(sim_data.data, dtype=complex)
 
         n = min(len(obs_vis), len(model_vis))
@@ -102,17 +128,64 @@ class VisibilityLikelihood(BaseLikelihood):
             ll_amp = gaussian_loglike(obs_amp, model_amp, sigma_arr)
 
         # ── Closure phase likelihood ───────────────────────────────────────────
+        # Fail closed rather than degrade silently: use_closure=True asserts the
+        # data carries closure phases, so their absence is an error.  An
+        # amplitude-only analysis is declared by constructing the likelihood
+        # with use_closure_phases=False, and either way the decision is recorded
+        # in last_closure_config.  See docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.8.2.
         ll_phase = 0.0
-        if self.use_closure:
+        if not self.use_closure:
+            self.last_closure_config = {
+                "used_closure_phase": False,
+                "reason": "caller declared an amplitude-only analysis",
+                "n_closure_phases": 0,
+            }
+        else:
             obs_closure = meta.get("closure_phases", None)
             model_closure = sim_data.metadata.get("closure_phases", None)
-            if obs_closure is not None and model_closure is not None:
-                obs_cp = np.asarray(obs_closure, dtype=float)
-                mod_cp = np.asarray(model_closure, dtype=float)
-                n_cp = min(len(obs_cp), len(mod_cp))
-                ll_phase = von_mises_loglike(obs_cp[:n_cp], mod_cp[:n_cp], self.kappa)
+            if obs_closure is None:
+                raise KeyError(
+                    "VisibilityLikelihood was constructed with "
+                    "use_closure_phases=True but the observation carries no "
+                    "'closure_phases'. Supply them, or construct the likelihood "
+                    "with use_closure_phases=False to declare an "
+                    "amplitude-only analysis. Observation keys: "
+                    f"{sorted(meta) if isinstance(meta, dict) else type(meta).__name__}"
+                )
+            if model_closure is None:  # pragma: no cover - simulator always sets it
+                raise KeyError(
+                    "ImageShadowSimulator produced no 'closure_phases' for the "
+                    "model visibilities; cannot form the closure-phase term."
+                )
+            obs_cp = np.asarray(obs_closure, dtype=float)
+            mod_cp = np.asarray(model_closure, dtype=float)
+            n_cp = min(len(obs_cp), len(mod_cp))
+            ll_phase = von_mises_loglike(obs_cp[:n_cp], mod_cp[:n_cp], self.kappa)
+            self.last_closure_config = {
+                "used_closure_phase": True,
+                "reason": "observation supplied closure phases",
+                "n_closure_phases": int(n_cp),
+            }
 
         return ll_amp + ll_phase
+
+    @staticmethod
+    def _require_uv_coverage(meta: Any, context: dict[str, Any]) -> NDArray:
+        """Baselines the observation was actually sampled on.
+
+        Fail-closed: falling back to a default array would compare the model and
+        the data at different points in the uv plane, which is the image-channel
+        version of a forward-model mismatch.
+        """
+        for source in (meta, context):
+            if isinstance(source, dict) and source.get("uv_coverage") is not None:
+                return np.asarray(source["uv_coverage"], dtype=float)
+        raise KeyError(
+            "VisibilityLikelihood needs the observation's 'uv_coverage' to "
+            "build model visibilities on the same baselines; neither the data "
+            "metadata nor the context provides it. Observation keys: "
+            f"{sorted(meta) if isinstance(meta, dict) else type(meta).__name__}"
+        )
 
     @staticmethod
     def _student_t_loglike(

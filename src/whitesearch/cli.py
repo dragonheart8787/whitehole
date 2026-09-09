@@ -605,7 +605,7 @@ def _get_likelihood(channel: str, model: str, *, likelihood_mode: str = "full"):
         "gw": GWLikelihood(model, use_full_likelihood=use_full),
         "radio": RadioBurstLikelihood(model),
         "xray": XRayBurstLikelihood(model),
-        "image": VisibilityLikelihood(),
+        "image": VisibilityLikelihood(model),
     }[channel]
 
 
