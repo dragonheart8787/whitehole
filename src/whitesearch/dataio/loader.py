@@ -153,11 +153,17 @@ def _load_mock(
     seed: int,
     reference_amplitude: bool,
 ) -> Any:
-    from ..models import get_model
+    from ..models import check_model_channel, get_model
     from ..simulators import get_simulator
 
     import numpy as np
 
+    # Fail closed before simulating: nothing downstream checks that the model
+    # belongs on this channel, and until the radio simulator stopped filling
+    # missing parameters from defaults, a GW model injected into the radio
+    # channel produced a plausible-looking burst built entirely out of those
+    # defaults.  See docs/RADIO_PREFLIGHT_AUDIT.md R.12.2.
+    check_model_channel(inject_model, channel)
     model = get_model(inject_model)
     sim = get_simulator(channel)
     params = model.sample_prior(np.random.default_rng(seed))

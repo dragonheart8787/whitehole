@@ -638,3 +638,160 @@ Jy·ms→J m⁻² Hz⁻¹、平坦 ΛCDM 的 `D_L`）逐項重算都與函式輸
 |---|---|---|
 | `tests/test_radio_forward_model.py` | 33 項 radio forward-model 對齊 regression 測試 | 是 |
 | `scratchpad/fluence_scale_diag.py` | R.6 尺度診斷腳本（只讀 production 模組） | 否 |
+
+---
+
+# R.15 R.13 三項保留意見的處理，與 `_load_mock()` 跨通道檢查（2026-09-09）
+
+> 本節記錄一次 **production 修正**（`models/pbh_tunneling.py`、`models/__init__.py`、
+> `dataio/loader.py`、`cli.py`、`simulators/em_burst.py`）。沒有跑任何 SBC/campaign。
+> 本節不含任何天文物理宣稱。
+
+## R.15.1 `W_obs_ms` 死程式碼：查到原始意圖，但**該意圖本身是錯的**——刪除
+
+`git log -S` 顯示這段從初始 commit（`eca27df`）起就沒改過。原始 docstring 寫的是：
+
+```
+F ≈ η_r * E_tot / (4π D_L² * Δν * W)
+where Δν ≈ 1 GHz (typical bandwidth) and W is the observed width.
+```
+
+**所以設計意圖是明確存在的：本來就想除以 W。但那個公式與函式的宣告單位不符。**
+量綱檢查：
+
+| 式子 | 量綱 | 是什麼 |
+|---|---|---|
+| `E /(4π D_L² Δν)` | J m⁻² Hz⁻¹ | **fluence**（時間已積分） |
+| `E /(4π D_L² Δν W)` | J m⁻² Hz⁻¹ s⁻¹ = W m⁻² Hz⁻¹ | **flux density**（Jy） |
+
+函式名是 `burst_fluence_jy_ms`、回傳單位宣告是 Jy·ms，而 docstring 的公式其實
+是一個 Jy。更關鍵的是消費端：
+
+```python
+# simulators/em_burst.py
+F_peak_jy = fluence_jy_ms / max(W_obs_ms, 1e-6)
+```
+
+**模擬器自己已經除了一次寬度。** 若照 docstring「接上」W，寬度會被除兩次。
+
+**處置：刪除死變數，並改寫 docstring 說明為什麼 fluence 不含寬度。**
+這是本輪唯一一項「找到意圖但判定不該接線」的項目——接上去會製造 bug，不是修好 bug。
+連帶把 `EMBurstSimulator._PBH_FLUENCE_KEYS` 從 5 個鍵縮成 3 個
+（`log10_M_g`, `log10_eta_r`, `z`），因為推導不再需要寬度參數。
+
+## R.15.2 `Δν` 寫死 1 GHz → 改用 CHIME 實際頻寬
+
+`configs/instruments/chime.yaml` 早就有 `observing.freq_low_mhz: 400.0` /
+`freq_high_mhz: 800.0`，即 **Δν = 400 MHz**。原本寫死的 1 GHz 不是本專案分析的
+任何一個頻帶。
+
+新增 `CHIME_BAND_LOW_MHZ` / `CHIME_BAND_HIGH_MHZ` / `RADIO_BANDWIDTH_HZ = 4.0e8`，
+並讓 `burst_fluence_jy_ms(params, delta_nu_hz=RADIO_BANDWIDTH_HZ)` 可覆寫。
+
+**為什麼是模組常數而不是在模型裡讀 YAML**：沿用 GW 側既有慣例
+（`alternatives.py` 的 `BAND_LOW_HZ` / `BAND_HIGH_HZ` 也是常數 + 註解指向
+`ligo.yaml`），避免物理模型做 import-time 檔案 IO。**但這次多加了一項
+GW 側沒有的保障**：`tests/test_radio_fluence_physics.py` 會實際讀
+`chime.yaml` 斷言常數與它一致，所以 YAML 仍是 single source of truth，
+漂移會被測試抓到。
+
+數值影響：**×1e9/4e8 = 2.5 倍**，與所有其他參數無關。
+
+## R.15.3 `(1+z)`：`D_L` 已經正確，但**頻寬轉換確實少了一個獨立因子**——補上
+
+先確認 `_dl_mpc()`：
+
+```python
+d_c_mpc = (c_km_s / H0) * chi_integral
+return float((1.0 + z) * d_c_mpc)
+```
+
+**距離的紅移修正已經是對的**，這就是標準平坦宇宙光度距離 `D_L = (1+z) D_C`。
+所以「報告提到 (1+z) 就加一個」是錯的做法。
+
+但獨立推導顯示還缺一個來自**時間與頻寬轉換**的因子：
+
+1. 靜止系總能量 `E`，`L(t_e)` 滿足 `E = ∫L dt_e`。
+2. 觀測流量 `F(t_o) = L/(4π D_L²)`，而 `dt_o = (1+z) dt_e`。
+3. 因此**波段積分後的能量 fluence** `∫F dt_o = (1+z) E/(4π D_L²)`
+   ——`D_L` 的定義針對的是**光度**（每單位時間），對已對時間積分的 fluence
+   而言那個時間膨脹因子要還回來。
+4. 再除以**觀測**頻寬 `Δν_obs` 得到每單位頻率的 fluence。
+
+即 `F_ν = (1+z) η_r E / (4π D_L² Δν_obs)`。這與 FRB 能量學常用的
+`E = 4π D_L² F_ν Δν / (1+z)` 反解一致（測試 `test_matches_the_standard_frb_energetics_relation`
+就是把這個關係反算回 `E` 驗證，`rel=1e-12`）。
+
+**處置：補上這一個 `(1+z)`，並在 docstring 明確寫清楚它不是距離修正。**
+數值影響：`×(1+z)`，先驗內從 1.0001（z=1e-4）到 6（z=5）。
+
+## R.15.4 `_load_mock()` 跨通道檢查
+
+`cli.py::_get_likelihood` 本來就有一張相容性表，但它只擋**擬合**side；
+**注入** side（`dataio/loader.py::_load_mock`）完全沒有檢查（§R.12.2）。
+
+處置：把那張表抽到 `models/__init__.py` 成為
+`CHANNEL_COMPATIBILITY` + `check_model_channel()`，**注入與擬合兩側共用同一張表**，
+`cli.py` 改為呼叫它（行為不變），`_load_mock()` 在模擬之前先檢查。
+
+`radio` 被列入 `xray` 的相容集合是既有設計（`PBHTunnelingWhiteHole` 帶有
+X 光模擬器要用的 gamma 效率），照抄未改。未知的資料通道**接受空集合**
+（fail-closed），所以新增通道而忘了決定相容性會報錯，不會安靜放行。
+
+`tests/test_cli_provenance.py::test_cross_channel_injection_now_fails_closed`
+的預期例外因此從 `KeyError`（模擬器缺鍵）改為 `ValueError`（通道不符），
+現在根本到不了模擬器。
+
+## R.15.5 數值影響：修正前後對照
+
+單點比較（`ratio = 2.5 × (1+z)`，逐點吻合到 1e-12）：
+
+| 參數組 | 修正前 [Jy·ms] | 修正後 [Jy·ms] | 倍率 |
+|---|---|---|---|
+| 樂觀角落 M=10¹⁶ g, η_r=1, z=1e-4 | 3.796142×10⁴ | **9.491305×10⁴** | **2.50025** |
+| 中位數附近 M=10¹⁴·⁵, η_r=1e-5, z=0.022 | 2.399975×10⁻⁷ | 6.131937×10⁻⁷ | 2.55500 |
+| §R.13.1 的工作案例 M=10¹⁵, η_r=1e-3, z=0.1 | 3.294151×10⁻⁶ | 9.058915×10⁻⁶ | 2.75000 |
+| 高 z 端 M=10¹⁵, η_r=1e-3, z=5 | 3.304671×10⁻¹⁰ | 4.957007×10⁻⁹ | 15.00000 |
+
+全先驗（20000 抽樣）：
+
+| 量 | 修正前 | 修正後 | 變化 |
+|---|---|---|---|
+| log10 fluence 中位數 | −6.670 | **−6.198** | **+0.472 dex** |
+| log10 fluence p1 / p99 | −15.776 / +1.971 | −14.890 / +2.369 | +0.886 / +0.398 |
+| 全距 | −17.866 – +4.479 | −16.702 – +4.877 | — |
+| 隱含 SNR ≥ 1 比例 | 0.01355 | 0.02210 | — |
+| 隱含 SNR ≥ 8 比例 | 0.00465 | 0.00785 | — |
+| 樂觀角落 vs CHIME 0.4/4/7 | +4.98 / +3.98 / +3.73 dex | **+5.38 / +4.38 / +4.13 dex** | — |
+| η_r=1, M=10¹⁶ 時 4 Jy·ms 的最遠距離 | z=0.00967（43.3 Mpc） | z=0.01534（69.0 Mpc） | — |
+
+## R.15.6 R.6 結論是否需要重新檢視：**不需要**
+
+以 CHIME 中位門檻 4 Jy·ms 為基準：修正前中位數落差 **7.27 dex**，
+修正後 **6.80 dex**。**這三項修正合計解釋了約 0.47 dex，佔整個落差的 6.5%。**
+
+先驗變異數的主導者不變：
+
+| 項 | r（與 log10 fluence） | log 變異數 |
+|---|---|---|
+| `log10_eta_r` | +0.7084（原 +0.6915） | 8.2685 |
+| `log10_z` | −0.6770（原 −0.6955） | 1.8571 |
+| `log10_M_g` | +0.2097（原 +0.2044） | 0.7568 |
+
+**§R.13.6 的結論維持成立：落差主要反映的是先驗範圍（尤其
+`log10_eta_r` 的 `uniform(-10, 0)`）的選擇，不是公式或單位問題。**
+差別在於原本列為「未確認」的三項保留意見，現在兩項已修正、一項
+（`W_obs_ms`）確認為應刪除而非應接線。
+
+新增測試 `tests/test_radio_fluence_physics.py`（11 項）中的
+`TestCorrectionsStayFactorLevel` 直接把這件事鎖住：全先驗的修正倍率
+下界 ≥ 2.5、上界 < 2 dex、中位數 < 10。
+
+**pytest：265 passed, 1 skipped, 1 deselected**（基準 `824392e` 是 247 passed，
+差額 +18 = 11 項 fluence 物理測試 + 7 項通道相容性測試；**沒有非預期 regression**）。
+
+## R.15.7 本節產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `tests/test_radio_fluence_physics.py` | 11 項 fluence 公式物理契約測試（含 chime.yaml 一致性斷言） | 是 |

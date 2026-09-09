@@ -596,20 +596,10 @@ def _get_likelihood(channel: str, model: str, *, likelihood_mode: str = "full"):
     from whitesearch.likelihoods import (
         GWLikelihood, RadioBurstLikelihood, XRayBurstLikelihood, VisibilityLikelihood,
     )
-    from whitesearch.models import get_model
+    from whitesearch.models import check_model_channel
 
-    model_channel = get_model(model).channel
-    compatible = {
-        "gw": {"gw", "generic"},
-        "radio": {"radio", "generic"},
-        "xray": {"xray", "radio", "generic"},
-        "image": {"image", "generic"},
-    }
-    if model_channel not in compatible.get(channel, set()):
-        raise ValueError(
-            f"Model '{model}' (native channel={model_channel}) "
-            f"cannot be fit on data channel '{channel}'"
-        )
+    # Same table the injection side now uses; see models.CHANNEL_COMPATIBILITY.
+    check_model_channel(model, channel)
     use_full = likelihood_mode == "full"
     return {
         "gw": GWLikelihood(model, use_full_likelihood=use_full),

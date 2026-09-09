@@ -24,6 +24,16 @@ from ..utils.constants import (
 )
 
 
+# Radio band the fluence conversion assumes, from
+# configs/instruments/chime.yaml -> observing.{freq_low_mhz, freq_high_mhz}.
+# tests/test_radio_fluence_physics.py asserts these against that file, so the
+# YAML stays the source of truth without a physics model doing import-time IO.
+# Previously the conversion hardcoded 1 GHz, which is not any band this project
+# analyses -- see docs/RADIO_PREFLIGHT_AUDIT.md R.13.2.
+CHIME_BAND_LOW_MHZ = 400.0
+CHIME_BAND_HIGH_MHZ = 800.0
+RADIO_BANDWIDTH_HZ = (CHIME_BAND_HIGH_MHZ - CHIME_BAND_LOW_MHZ) * 1.0e6  # 4e8 Hz
+
 # PBH mass range for observable events today (in grams and solar masses)
 # τ_Hawking ~ 5120π G² M³ / (ℏ c⁴) → observable for M ~ 10^{14–15} g
 PBH_MASS_MIN_G = 1e13   # grams
@@ -163,40 +173,58 @@ class PBHTunnelingWhiteHole(BaseModel):
         dm_host = params["DM_host"]
         return dm_mw + dm_igm + dm_host
 
-    def burst_fluence_jy_ms(self, params: dict[str, float], nu_ref_ghz: float = 1.0) -> float:
-        """Estimate radio burst fluence [Jy ms] at reference frequency ν_ref.
+    def burst_fluence_jy_ms(
+        self,
+        params: dict[str, float],
+        delta_nu_hz: float = RADIO_BANDWIDTH_HZ,
+    ) -> float:
+        """Radio burst energy fluence [Jy ms] over the observed band.
 
-        F ≈ η_r * E_tot / (4π D_L² * Δν * W)
-        where Δν ≈ 1 GHz (typical bandwidth) and W is the observed width.
+            F_nu = (1 + z) * eta_r * E_tot / (4 pi D_L^2 * delta_nu_obs)
+
+        A *fluence* is energy per area per unit frequency, already integrated
+        over time, so the observed burst width does NOT appear: dividing by it
+        would give a flux density in Jy instead.  EMBurstSimulator is the
+        consumer and it divides this by the width itself to get the peak flux,
+        so a width here would be counted twice.  An earlier docstring wrote
+        ``F ~ eta_r E / (4 pi D_L^2 Delta_nu W)``, which is dimensionally a flux
+        density and disagrees with both the return unit and the caller; the
+        width terms it implied were computed and then never used.  See
+        docs/RADIO_PREFLIGHT_AUDIT.md R.13.2 and R.15.
+
+        The ``(1 + z)`` is NOT the distance correction -- ``_dl_mpc()`` already
+        returns ``(1 + z) * D_C``, the standard luminosity distance.  It is the
+        separate bandwidth transformation: ``delta_nu_hz`` is an *observed*
+        bandwidth, and a rest-frame band maps to an observed band narrower by
+        ``(1 + z)``, so the energy fluence per unit observed frequency carries
+        one factor of ``(1 + z)``.  Equivalent to the usual FRB energetics
+        relation ``E = 4 pi D_L^2 F_nu delta_nu / (1 + z)`` solved for F_nu.
+
+        Parameters
+        ----------
+        delta_nu_hz : float
+            Observed bandwidth the burst energy is taken to span.  Defaults to
+            the CHIME band this project analyses (400-800 MHz), not the 1 GHz
+            that was previously hardcoded.
         """
-        from ..utils.constants import JY, GPC_M
+        from ..utils.constants import JY
 
-        M_g = 10.0 ** params["log10_M_g"]
-        M_kg = M_g * 1e-3
+        M_kg = (10.0 ** params["log10_M_g"]) * 1e-3
         eta_r = 10.0 ** params["log10_eta_r"]
-        z = params["z"]
+        z = float(params["z"])
 
         # Total released energy ~ M c²
         E_tot = M_kg * C**2  # J
 
-        # Comoving / luminosity distance (simple flat ΛCDM approximation)
-        # D_L ≈ z * c / H0  for z ≪ 1  (use proper integrator for z > 0.5)
-        D_L_mpc = self._dl_mpc(z)
-        D_L_m = D_L_mpc * MPC_M
+        # Luminosity distance (flat ΛCDM); already carries its own (1 + z).
+        D_L_m = self._dl_mpc(z) * MPC_M
 
-        # Observed width
-        W_int_ms = 10.0 ** params["log10_W_int_ms"]
-        tau_sc_ms = 10.0 ** params["log10_tau_sc_ms"]
-        W_obs_ms = np.sqrt(W_int_ms**2 + tau_sc_ms**2)
-
-        # Bandwidth (1 GHz default)
-        delta_nu_hz = 1.0e9
-
-        fluence_j_per_hz = eta_r * E_tot / (4.0 * np.pi * D_L_m**2 * delta_nu_hz)
+        fluence_j_per_hz = (
+            (1.0 + z) * eta_r * E_tot
+            / (4.0 * np.pi * D_L_m**2 * float(delta_nu_hz))
+        )
         # Convert to Jy·ms: 1 Jy·ms = 1e-26 W/m²/Hz * 1e-3 s = 1e-29 J/m²/Hz
-        fluence_jy_ms = fluence_j_per_hz / (JY * 1e-3)
-
-        return float(fluence_jy_ms)
+        return float(fluence_j_per_hz / (JY * 1e-3))
 
     @staticmethod
     def _dl_mpc(z: float) -> float:

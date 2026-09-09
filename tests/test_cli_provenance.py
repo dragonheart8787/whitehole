@@ -40,14 +40,13 @@ def test_inject_model_recorded_in_provenance_via_loader():
 
 
 def test_cross_channel_injection_now_fails_closed():
-    """Injecting a GW model into the radio channel raises instead of defaulting.
+    """Injecting a GW model into the radio channel is rejected up front.
 
-    _load_mock() does not check that the model's declared channel matches the
-    simulator's, so this pairing is still reachable; what changed is that the
-    simulator no longer invents a burst out of default values for a model that
-    declares none of its parameters.
+    _load_mock() now checks the model's declared channel against the data
+    channel before simulating (models.check_model_channel), so this never
+    reaches the simulator at all.
     """
-    with pytest.raises(KeyError, match="log10_W_int_ms"):
+    with pytest.raises(ValueError, match="native channel"):
         load_observation_data(
             "mock", "radio", inject_model="bh_ringdown", seed=1,
             context={

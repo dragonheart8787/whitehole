@@ -186,8 +186,10 @@ class EMBurstSimulator(BaseSimulator):
         )
 
     #: Parameters that let PBHTunnelingWhiteHole derive its own fluence.
-    _PBH_FLUENCE_KEYS = ("log10_M_g", "log10_eta_r", "z",
-                         "log10_W_int_ms", "log10_tau_sc_ms")
+    #: The width terms used to be listed here because the fluence function read
+    #: them; it no longer does (a fluence is time-integrated), see
+    #: docs/RADIO_PREFLIGHT_AUDIT.md R.15.1.
+    _PBH_FLUENCE_KEYS = ("log10_M_g", "log10_eta_r", "z")
 
     @classmethod
     def _get_fluence(cls, params: dict[str, float]) -> float:

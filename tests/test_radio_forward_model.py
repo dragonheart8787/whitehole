@@ -13,7 +13,7 @@ import pytest
 
 from whitesearch.inference import BilbyRunner
 from whitesearch.likelihoods import RadioBurstLikelihood
-from whitesearch.models import get_model
+from whitesearch.models import check_model_channel, get_model
 from whitesearch.models.pbh_tunneling import PBHTunnelingWhiteHole
 from whitesearch.simulators import get_simulator
 from whitesearch.simulators.em_burst import EMBurstSimulator
@@ -234,3 +234,36 @@ class TestFluenceKeyContract:
     def test_pbh_fluence_keys_are_all_declared_by_the_model(self):
         declared = set(get_model("pbh_tunneling").parameter_names)
         assert set(EMBurstSimulator._PBH_FLUENCE_KEYS) <= declared
+
+
+class TestChannelCompatibilityIsCheckedOnBothSides:
+    """R.12.2: the injection side now uses the same table as the fit side."""
+
+    def test_matching_channel_passes(self):
+        for model_name, channel in (("magnetar", "radio"), ("bh_ringdown", "gw"),
+                                    ("pbh_tunneling", "radio"),
+                                    ("pbh_tunneling", "xray"),
+                                    ("null", "radio"), ("null", "gw")):
+            check_model_channel(model_name, channel)
+
+    @pytest.mark.parametrize(
+        "model_name,channel",
+        [("bh_ringdown", "radio"), ("magnetar", "gw"),
+         ("bh_accretion", "radio"), ("magnetar", "image")],
+    )
+    def test_mismatched_channel_raises(self, model_name, channel):
+        with pytest.raises(ValueError, match="native channel"):
+            check_model_channel(model_name, channel)
+
+    def test_unknown_data_channel_accepts_nothing(self):
+        with pytest.raises(ValueError, match="unknown data channel"):
+            check_model_channel("magnetar", "neutrino")
+
+    def test_loader_rejects_before_simulating(self):
+        from whitesearch.dataio.loader import load_observation_data
+
+        with pytest.raises(ValueError, match="native channel"):
+            load_observation_data(
+                "mock", "radio", inject_model="bh_ringdown", seed=1,
+                context={"n_freq_chans": 8, "n_time_bins": 32, "rng_seed": 1},
+            )
