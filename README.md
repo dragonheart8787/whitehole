@@ -27,6 +27,21 @@
 
 **預設行為：真資料載入失敗會直接報錯退出，不會悄悄改用 mock。**
 
+## 通道現況與稽核文件
+
+**單一入口：[`docs/CHANNEL_STATUS_OVERVIEW.md`](docs/CHANNEL_STATUS_OVERVIEW.md)**
+——四條通道的成熟度、已完成修正、已知限制與待決策事項總覽。
+
+| 文件 | 範圍 |
+|---|---|
+| [`docs/CHANNEL_STATUS_OVERVIEW.md`](docs/CHANNEL_STATUS_OVERVIEW.md) | **跨通道現況總覽（先看這份）** |
+| [`docs/GW_LIKELIHOOD_STABILIZATION_POSTMORTEM.md`](docs/GW_LIKELIHOOD_STABILIZATION_POSTMORTEM.md) | GW likelihood 穩定化 postmortem |
+| [`docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md`](docs/BH_RINGDOWN_SBC_COVERAGE_REPORT.md) | `bh_ringdown` 校準驗證 |
+| [`docs/BOUNCE_SBC_COVERAGE_REPORT.md`](docs/BOUNCE_SBC_COVERAGE_REPORT.md) | `bounce` 校準工作線總結 |
+| [`docs/BOUNCE_PREFLIGHT_AUDIT.md`](docs/BOUNCE_PREFLIGHT_AUDIT.md) | `bounce` 逐輪原始證據（Part A–J） |
+| [`docs/RADIO_PREFLIGHT_AUDIT.md`](docs/RADIO_PREFLIGHT_AUDIT.md) | radio 通道稽核 |
+| [`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md`](docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md) | xray + image 通道稽核 |
+
 ## 安裝（分層依賴）
 
 ### 最小安裝（核心 + CLI）
