@@ -251,9 +251,13 @@ SBC/coverage campaign 的通道。
 - **第三方設定「看似傳入、實際無效」出現兩次，都在 bilby 2.8.2 的 dynesty 介面**
   （Part K.2）：`sample='rwalk'` 下 `walks` 完全不被讀取（鏈長由 `nact` 決定），
   而使用者傳入的 `maxcall` 會被 bilby 覆蓋成自己的 checkpoint 分塊大小。
-  `BilbyRunner.DEFAULT_DYNESTY_KWARGS` 裡的 `walks: 32` 因此是無作用設定——
-  **已回報，未修改**。教訓：驗證設定是否生效要看**行為**（bilby 自己的日誌、
-  ncall 變化），不能看「鍵是否出現在 kwargs 裡」。
+  **兩項均已修正（見 Part L）**：`DEFAULT_DYNESTY_KWARGS` 的
+  `walks: 32` 換成 `nact: 2`（bilby 自己的預設值，所以行為不變、既有校準結果
+  仍可重現），逾時改用不依賴 bilby 的 `_BudgetGuard`（在 likelihood 內部檢查
+  牆鐘與呼叫數，超出即拋 `SamplingBudgetExceeded`）。
+  教訓已寫成測試：驗證設定是否生效要看**行為**，不能看「鍵是否出現在 kwargs 裡」
+  ——`AcceptanceTrackingRWalk` 物件**確實有** `walks` 屬性，值卻恆為 dynesty 的
+  預設 25，與傳入值無關。
 - **`params.get(key, default)` 的靜默預設是重複出現最多次的失效模式**：
   GW（`3.086e22` vs `MPC_M`）、radio（R.4，三組命名）、xray（X.2，十個參數）、
   image（`bh_accretion` 的三個幾何參數）都命中過。radio 已改為 fail-closed

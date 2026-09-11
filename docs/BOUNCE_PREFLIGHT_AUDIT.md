@@ -1784,3 +1784,76 @@ chain length. An average of 16 steps will be accepted up to chain length 5000.
 |---|---|---|
 | `docs/calibration/bounce_ridge_sampler_pilot.csv` | 21 次執行（base 12 + nact8 9）的設定、耗時、ncall、涵蓋旗標、區間寬度、`M`–`eps_f` 相關 | 是 |
 | `scratchpad/ridge_pilot.py` | pilot 驅動腳本（只讀 production 模組） | 否 |
+
+---
+
+# Part L：取樣器設定生效性修正與逾時機制補強（2026-09-11）
+
+> 本節記錄一次 **production 修正**（`inference/bilby_runner.py`、`cli.py`）。
+> **這是工具層修正，不改變任何已發布校準結果的數學內容**——`nact=2` 就是
+> bilby 自己的預設值，先前所有 `sample='rwalk'` 的 campaign 實際用的就是這個
+> 鏈長，所以 §C、§D、§I、§K 的數字全部維持有效，不需要重跑。本節不含任何
+> 天文物理宣稱。
+
+## L.1 `walks` → `nact`（修正 K.2.1）
+
+`BilbyRunner.DEFAULT_DYNESTY_KWARGS` 原本是
+`{"bound": "live", "sample": "rwalk", "walks": 32, "dlogz": 0.1}`。
+其中 `walks: 32` 在 `sample='rwalk'` 下**從未被 bilby 讀取**，現改為 `nact: 2`。
+
+**為什麼是 `nact: 2` 而不是別的值**：2 是 bilby `Dynesty.__init__` 的預設，
+也就是先前每一次 campaign 實際生效的鏈長（平均接受步數 = 2×nact = 4）。
+**移除死設定不改變行為**，這是刻意的——若同時調整鏈長，先前的校準結果就不再
+可重現，而本輪的目的是修工具、不是改結果。
+
+`cli.py` 的 `--dynesty-sample` 兩處 help text 補上說明：鏈長由 `nact` 控制
+（`rwalk` / `act-walk`），`walks` 只在 `acceptance-walk` 有效。
+專案沒有把 `walks` 暴露成 CLI 參數或 config 欄位，所以沒有其他呼叫端要改。
+
+## L.2 獨立逾時機制（修正 K.2.2）
+
+**先確認這是 bilby 的既有行為而非誤用**：`bilby/core/sampler/dynesty.py` 裡有
+
+```python
+sampler_kwargs["maxcall"] = self.n_check_point
+```
+
+bilby 把 `maxcall` 當作自己的 checkpoint 分塊大小，**無條件覆蓋**呼叫端傳入的值。
+這不是可以靠正確用法繞開的限制，也不是本專案的 bug；本輪**不修改 bilby**，
+只在註解與本節記錄清楚，並改為不依賴這個參數。
+
+新增 `SamplingBudgetExceeded` 與 `_BudgetGuard`，`BilbyRunner` 增加兩個參數：
+
+| 參數 | 意義 |
+|---|---|
+| `run_timeout_s` | 單次執行的牆鐘預算 |
+| `max_likelihood_calls` | 單次執行的 likelihood 呼叫數預算 |
+
+**檢查點放在 likelihood 內部**——每個取樣器都必須呼叫它，所以無論卡在哪個
+內部迴圈都能即時中止，不必等取樣器願意給的 checkpoint。超出預算時拋
+`SamplingBudgetExceeded`；`InjectionRecovery` 既有的 per-injection try/except
+會把它記成 `failed_indices`，也就是**「這筆超出預算」會被如實記錄，
+而不是被當成一個收斂的 posterior**（fail-closed）。
+
+兩個預算都不設時，`_BudgetGuard.guard()` 直接回傳原函式，沒有任何包裝開銷。
+
+## L.3 測試
+
+新增 `tests/test_sampler_settings_effective.py`（13 項），全部以**行為**驗證：
+
+- `nact` 確實傳到 bilby 內部的 `AcceptanceTrackingRWalk`（`internal.nact == nact`）；
+- `walks=32` 與 `walks=128` 在 `rwalk` 下得到**完全相同**的內部取樣器；
+- **這個陷阱本身也被鎖住**：該物件**確實有** `walks` 屬性，但值恆為 dynesty
+  的預設 **25**，與傳入的 32 或 128 都不同——所以「kwargs 裡有這個鍵」或
+  「物件有這個屬性」都不能當作生效的證據；
+- `walks` 在 `sample='acceptance-walk'` 下確實生效（同一個鍵、不同方法、不同行為）；
+- 專案預設值仍是 `nact=2`，確保行為不變；
+- `_BudgetGuard` 的呼叫數預算、牆鐘預算（用注入的假時鐘模擬「卡住」的慢函式，
+  不需要真的跑一個卡住的 dynesty）、真實時鐘下在 2 秒內中止、
+  無預算時永不拋出、以及 `BilbyRunner._wrap_likelihood` 確實套用預算。
+
+## L.4 產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `tests/test_sampler_settings_effective.py` | 13 項設定生效性與預算機制測試 | 是 |

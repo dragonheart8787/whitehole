@@ -69,7 +69,11 @@ def main():
 @click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
 @click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
 @click.option("--dynesty-bound", default="live", show_default=True)
-@click.option("--dynesty-sample", default="rwalk", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True,
+              help="dynesty sample method. Chain length is set by nact for "
+                   "'rwalk'/'act-walk' and by walks only for "
+                   "'acceptance-walk' -- passing walks with 'rwalk' has no "
+                   "effect (see BilbyRunner.DEFAULT_DYNESTY_KWARGS).")
 @_allow_mock_opt
 def fit(
     model, channel, data, event, inject_model, config, nlive, outdir, seed, resume,
@@ -123,7 +127,11 @@ def fit(
 @click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
 @click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
 @click.option("--dynesty-bound", default="live", show_default=True)
-@click.option("--dynesty-sample", default="rwalk", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True,
+              help="dynesty sample method. Chain length is set by nact for "
+                   "'rwalk'/'act-walk' and by walks only for "
+                   "'acceptance-walk' -- passing walks with 'rwalk' has no "
+                   "effect (see BilbyRunner.DEFAULT_DYNESTY_KWARGS).")
 @_allow_mock_opt
 def compare(
     model, null_model, alt_model, channel, data, event, inject_model, config,

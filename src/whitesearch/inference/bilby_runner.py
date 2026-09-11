@@ -25,6 +25,81 @@ from ..models.base import BaseModel
 logger = logging.getLogger(__name__)
 
 
+class SamplingBudgetExceeded(RuntimeError):
+    """A sampler run exceeded its wall-clock or likelihood-call budget.
+
+    Raised from inside the likelihood so the run stops promptly wherever it is,
+    rather than only at whatever checkpoint the sampler happens to offer.
+    Callers that score many runs (InjectionRecovery) already treat an exception
+    as a recorded failure, which is the fail-closed outcome: a run that ran out
+    of budget is reported as such, never as a converged posterior.
+    """
+
+
+class _BudgetGuard:
+    """Wall-clock and call-count budget for one sampler run.
+
+    Deliberately independent of dynesty's own ``maxcall``: bilby 2.8.2
+    overwrites ``sampler_kwargs["maxcall"]`` with its checkpoint chunk size
+    (``self.n_check_point``), so a caller-supplied value is silently discarded
+    and never limits anything.  Measured in docs/BOUNCE_PREFLIGHT_AUDIT.md
+    K.2.2, where a requested budget of 7e5 calls did not stop runs that reached
+    7.7e6 and 1.1e7 calls over 4.6 and 6.0 hours.
+    """
+
+    def __init__(
+        self,
+        max_seconds: float | None = None,
+        max_calls: int | None = None,
+        time_fn: Any = None,
+    ) -> None:
+        self.max_seconds = float(max_seconds) if max_seconds else None
+        self.max_calls = int(max_calls) if max_calls else None
+        self._time = time_fn or time.monotonic
+        self.calls = 0
+        self.started_at: float | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.max_seconds is not None or self.max_calls is not None
+
+    def start(self) -> "_BudgetGuard":
+        self.started_at = self._time()
+        self.calls = 0
+        return self
+
+    @property
+    def elapsed(self) -> float:
+        return 0.0 if self.started_at is None else self._time() - self.started_at
+
+    def check(self) -> None:
+        """Raise if either budget is spent.  Counts this call."""
+        if self.started_at is None:
+            self.start()
+        self.calls += 1
+        if self.max_calls is not None and self.calls > self.max_calls:
+            raise SamplingBudgetExceeded(
+                f"likelihood-call budget exhausted: {self.calls} > "
+                f"{self.max_calls} calls after {self.elapsed:.1f} s"
+            )
+        if self.max_seconds is not None and self.elapsed > self.max_seconds:
+            raise SamplingBudgetExceeded(
+                f"wall-clock budget exhausted: {self.elapsed:.1f} s > "
+                f"{self.max_seconds:.1f} s after {self.calls} likelihood calls"
+            )
+
+    def guard(self, fn: Any) -> Any:
+        """Return ``fn`` with a budget check in front of every call."""
+        if not self.active:
+            return fn
+
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            self.check()
+            return fn(*args, **kwargs)
+
+        return _guarded
+
+
 def _taper_provenance(likelihood: BaseLikelihood, data: Any) -> dict[str, Any]:
     """Audit record of the taper this run's likelihood applied, if any.
 
@@ -130,14 +205,37 @@ class BilbyRunner:
         Resume from a previous run if checkpoint exists.
     seed : int
         Random seed for reproducibility.
+    run_timeout_s : float | None
+        Wall-clock budget for a single run.  Enforced by raising
+        SamplingBudgetExceeded from inside the likelihood, because dynesty's
+        own ``maxcall`` is overwritten by bilby and cannot limit anything.
+    max_likelihood_calls : int | None
+        Likelihood-call budget for a single run, enforced the same way.
     sampler_kwargs : dict
         Additional keyword arguments passed to bilby.run_sampler().
+
+        Note on chain length: with ``sample="rwalk"`` (the default) the knob is
+        ``nact``, not ``walks``; ``walks`` is read only when
+        ``sample="acceptance-walk"``.  Passing ``walks`` alongside
+        ``sample="rwalk"`` has no effect whatsoever.
     """
 
+    #: Dynesty settings every run starts from.
+    #:
+    #: ``nact`` rather than ``walks`` is what sets the random-walk chain length
+    #: here.  With ``sample="rwalk"`` bilby 2.8.2 substitutes its own
+    #: ``AcceptanceTrackingRWalk``, whose chain length comes from ``nact``
+    #: (average accepted steps = 2 * nact); ``walks`` is read only by the
+    #: ``sample="acceptance-walk"`` branch.  This entry used to read
+    #: ``"walks": 32``, which therefore did nothing at all -- measured in
+    #: docs/BOUNCE_PREFLIGHT_AUDIT.md K.2.1, where walks=128 against walks=32
+    #: changed ncall by 4% and the 90% width by 2%.  ``nact=2`` is bilby's own
+    #: default, so removing the dead key does not change behaviour: runs made
+    #: before this edit had the same effective chain length.
     DEFAULT_DYNESTY_KWARGS: dict[str, Any] = {
         "bound": "live",
         "sample": "rwalk",
-        "walks": 32,
+        "nact": 2,
         "dlogz": 0.1,
     }
 
@@ -151,6 +249,8 @@ class BilbyRunner:
         force_toy: bool = False,
         dynesty_bound: str | None = None,
         dynesty_sample: str | None = None,
+        run_timeout_s: float | None = None,
+        max_likelihood_calls: int | None = None,
         **sampler_kwargs: Any,
     ) -> None:
         self.sampler = sampler
@@ -158,6 +258,10 @@ class BilbyRunner:
         self.outdir = Path(outdir)
         self.resume = resume
         self.seed = seed
+        # Enforced inside the likelihood, NOT via dynesty's maxcall, which
+        # bilby overwrites -- see _BudgetGuard.
+        self.run_timeout_s = run_timeout_s
+        self.max_likelihood_calls = max_likelihood_calls
         env_force = os.environ.get("WHITESEARCH_FORCE_TOY", "").strip().lower() in (
             "1", "true", "yes",
         )
@@ -429,14 +533,28 @@ class BilbyRunner:
         ws_ll = likelihood
         ws_data = data
         ws_ctx = context
+        guard = _BudgetGuard(
+            max_seconds=self.run_timeout_s,
+            max_calls=self.max_likelihood_calls,
+        )
+        self.last_budget_guard = guard
+
+        def _evaluate(parameters: dict[str, float]) -> float:
+            val = ws_ll.loglike(parameters, ws_data, ws_ctx)
+            return float(val) if np.isfinite(val) else -1e30
+
+        # The budget is checked here, on the one call every sampler has to make,
+        # rather than handed to dynesty as maxcall (which bilby discards).
+        evaluate = guard.guard(_evaluate)
+        if guard.active:
+            guard.start()
 
         class _Wrapper(bilby.core.likelihood.Likelihood):
             def __init__(self):
                 super().__init__(parameters=params)
 
             def log_likelihood(self) -> float:
-                val = ws_ll.loglike(self.parameters, ws_data, ws_ctx)
-                return float(val) if np.isfinite(val) else -1e30
+                return evaluate(self.parameters)
 
         return _Wrapper()
 
