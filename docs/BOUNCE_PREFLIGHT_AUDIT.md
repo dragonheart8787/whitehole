@@ -1628,3 +1628,159 @@ KS p = 0.948）。**
 | `docs/calibration/bounce_M_band_edge_stratification.csv` | 100 筆的 `f_rd`／`f_burst`、四種邊界距離度量、8 參數的 rank 與三個水準的涵蓋旗標、90% 區間寬度 | 是 |
 | `docs/calibration/bounce_M_epsf_degeneracy_check.csv` | 100 筆的推導 `f_rd` 真值與 rank／涵蓋、posterior `M`–`eps_f` 相關係數、`M`／`eps_f` 落在區間哪一側 | 是 |
 | `scratchpad/band_strat.py`, `scratchpad/degen_check.py` | 分析腳本（只讀既有 posterior） | 否 |
+
+---
+
+# Part K：簡併脊殘留的取樣器設定定向 pilot（2026-09-11）
+
+> **這是階段式驗證的階段一，不是新的 campaign，也不是 production 修正。**
+> 沒有修改任何 production 檔案；只是把 §I.3 那次 N=100 campaign 裡**已知的
+> 12 筆問題樣本**，用相同的真值與雜訊實現、不同的取樣器設定重新推論。
+> 沒有跑 SBC。本節不含任何天文物理宣稱。
+
+## K.1 設計
+
+§J.6 找出 `M` 與 `eps_f` 同時未涵蓋 90% 區間的 12 筆：
+
+```
+20260925 20260928 20260941 20260944 20260946 20260948
+20260956 20260973 20260991 20260996 20260997 20260999
+```
+
+資料重建逐字照 `validation/injection.py::run_injections`
+（`rng_i = default_rng(seed)` → `sample_prior(rng_i)` →
+`simulate(theta, {**CTX, 'rng_seed': seed}, rng=rng_i)`），所以真值與雜訊
+與原 campaign 完全相同，只改取樣器設定。
+
+**`base` 這一組不是多餘的對照，而是判讀基準線**：這 12 筆是依「在原 campaign 中
+miss」挑出來的，存在選擇效應，即使用相同設定重跑，回歸平均也會讓部分「恢復」。
+因此判讀一律是 **nact8 對 base 的彙總比例**，不看逐筆翻轉。
+
+## K.2 兩個「設定沒有生效」的發現（都是量測出來的）
+
+### K.2.1 `walks` 在 `sample='rwalk'` 下完全無效
+
+第一版 pilot 的加強組是 `walks=128`。實測與 base 幾乎相同：
+
+| | ncall | `w90(M)` |
+|---|---|---|
+| base（`walks=32`） | 2.70×10⁵ | 42.21 |
+| `walks=128` | 2.80×10⁵ | 43.06 |
+
+查 bilby 2.8.2 `core/sampler/dynesty.py`：`sample='rwalk'` 會換成 bilby 自家的
+`AcceptanceTrackingRWalk`，鏈長由 **`nact`**（預設 2，平均接受步數 = 2×nact）決定；
+`walks` **只有** `sample='acceptance-walk'` 分支會讀（第 238–257 行）。
+bilby result 的 `sampler_kwargs` 裡也根本沒有 `walks` 鍵。
+
+**production 影響**：`BilbyRunner.DEFAULT_DYNESTY_KWARGS` 目前是
+`{"bound": "live", "sample": "rwalk", "walks": 32, "dlogz": 0.1}`，
+其中 **`walks: 32` 是無作用的設定**。**本輪僅回報，未修改。**
+
+### K.2.2 使用者傳入的 `maxcall` 會被 bilby 覆蓋
+
+第二版加了 `maxcall=700000` 當每筆的硬預算。它從未生效——bilby 有這一行：
+
+```python
+sampler_kwargs["maxcall"] = self.n_check_point
+```
+
+bilby 把 `maxcall` 挪作自己的 checkpoint 分塊大小。實測後果：兩筆 `nact8` 分別跑到
+ncall **7.7×10⁶**（4 小時 39 分）與 **1.1×10⁷**（6 小時 01 分）仍未收斂，
+是預算的 11–16 倍。因此本節記錄的 `budget_capped` 旗標只代表
+「ncall 超過 7×10⁵」，**不代表有任何上限被執行過**。
+
+### K.2.3 驗證方式的更正
+
+原本要求「檢查 result JSON 的 `sampler_kwargs` 是否含 `nact=8`」。
+**那個檢查會給出假陰性**：`nact` 與 `walks` 一樣被 bilby 吃進自己的
+sampler 物件，不會出現在 dynesty 的 `sampler_kwargs` 裡，即使完全生效。
+改用**行為驗證**，bilby 自己的日誌：
+
+```
+Using the bilby-implemented ensemble rwalk sampling method with ACT estimated
+chain length. An average of 16 steps will be accepted up to chain length 5000.
+```
+
+`16 = 2 × nact = 2 × 8` ✅（base 是 `2 × 2 = 4`）。第二個獨立佐證是成本：
+配對樣本的 ncall 中位數上升 **4.26 倍**。
+
+## K.3 完成度
+
+| 組 | 設定 | 完成 |
+|---|---|---|
+| `base` | `nlive=250, sample='rwalk'`，預設 `nact=2`（平均 4 步） | **12/12** |
+| `nact8` | `nlive=250, sample='rwalk', nact=8`（平均 16 步） | **9/12** |
+
+未完成的 3 筆：`20260944`、`20260956`（兩筆分別在 4 小時 39 分、6 小時 01 分後
+效率 0.1%、`nc` 卡在 maxmcmc 上限 5001 仍未收斂，依約定中止）、
+`20260973`（未開始）。**配對比較使用 9 筆。**
+
+## K.4 逐筆對照（9 筆配對）
+
+| seed | base `M` | base `eps_f` | base `w90(M)` | base ncall | nact8 `M` | nact8 `eps_f` | nact8 `w90(M)` | nact8 ncall | 寬度比 |
+|---|---|---|---|---|---|---|---|---|---|
+| 20260925 | 0 | 1 | 42.21 | 2.7e5 | 0 | 1 | 43.64 | 8.9e5 | 1.034 |
+| 20260928 | 0 | 0 | 110.6 | 1.1e6 | 0 | 0 | 122.0 | 8.0e6 | 1.103 |
+| 20260941 | 0 | 0 | 74.26 | 4.6e5 | 0 | 0 | 76.64 | 2.0e6 | 1.032 |
+| 20260946 | 0 | 0 | 100.5 | 1.3e6 | 0 | **1** | 118.5 | 6.5e6 | 1.179 |
+| 20260948 | **1** | 0 | 67.19 | 5.1e5 | **1** | 0 | 69.83 | 1.9e6 | 1.039 |
+| 20260991 | 0 | 0 | 32.95 | 7.3e4 | 0 | 0 | 33.01 | 2.3e5 | 1.002 |
+| 20260996 | 0 | 0 | 47.37 | 2.2e6 | **1** | 0 | 54.45 | 1.2e7 | 1.149 |
+| 20260997 | 0 | 1 | 27.95 | 1.1e5 | 0 | 1 | 28.97 | 3.3e5 | 1.036 |
+| 20260999 | 0 | 0 | 32.74 | 2.6e5 | 0 | 0 | 30.62 | 1.5e6 | 0.935 |
+
+## K.5 彙總比例
+
+| 量 | `base` | `nact8` |
+|---|---|---|
+| `in90_M` | **1/9** | **2/9** |
+| `in90_eps_f` | **2/9** | **3/9** |
+| `w90(M)` 中位數 | 47.37 | 54.45 |
+| `w90(eps_f)` 中位數 | 0.4807 | 0.5105 |
+| ncall 中位數 | 4.63×10⁵ | **1.91×10⁶** |
+| 耗時中位數 | 610 s | **3618 s** |
+
+配對比值：
+
+| 比值 | 中位數 | 範圍 |
+|---|---|---|
+| `w90(M)` nact8/base | **1.0363** | [0.9351, 1.1786] |
+| `w90(eps_f)` nact8/base | **1.0543** | [0.9844, 1.1729] |
+| ncall nact8/base | **4.264** | — |
+
+`w90(M)` 的 Wilcoxon signed-rank：**p = 0.0273**。
+
+完整 `base` 組（12/12）：`in90_M` **1/12**、`in90_eps_f` **2/12**、
+`w90(M)` 中位數 47.06。
+
+## K.6 一句話結論
+
+**提升 `nact` 不能解決簡併脊的殘留 under-coverage：把平均接受步數從 4 提到 16
+（成本 4.26 倍、耗時中位數 610 s → 3618 s）之後，`M` 的 90% 區間寬度中位數只增加
+3.6%（Wilcoxon p = 0.0273，方向確實是系統性變寬，但幅度極小），而 §J.7 量到的缺口
+需要約 43% 的增寬（區間只有應有寬度的 0.699 倍）；9 筆配對樣本的 `in90_M`
+從 1/9 變成 2/9、`in90_eps_f` 從 2/9 變成 3/9，在這個樣本數下不可與雜訊區分。**
+
+**依約定停在階段一，不進行階段二的完整 N=100 campaign，也不自行嘗試其他設定組合。**
+
+## K.7 必須一併說明的限制
+
+1. **`nact8` 只完成 9/12**，其中 2 筆是因為在 4.6–6.0 小時後仍未收斂而中止。
+   那 2 筆本身是資訊：**加長鏈長讓最難取樣的樣本從數十分鐘變成 6 小時仍不收斂**，
+   效率掉到 0.1%、`nc` 長期卡在 maxmcmc 上限。
+2. **選擇效應**：12 筆是依「原 campaign 中 miss」挑出的，所以 `base` 組本身
+   也會有少量「恢復」——實測 `base` 的 `in90_M` 是 1/12 而非 0/12，
+   `20260948` 在相同設定下重跑就含住了真值。這正是為什麼判讀用彙總比例而非逐筆翻轉。
+3. **dynesty 在此設定下不可重現**：同一筆 `20260925` 用相同設定重跑，
+   posterior 樣本數 1036（campaign 存檔）vs 897／994（我兩次重跑），
+   `eps_f` 的 in90 判定由 0 翻成 1。`BilbyRunner(seed=42)` 沒有讓結果逐位元可重現。
+4. **沒有對 `nlive` 做對照**（原計畫的 `nlive500` 組在縮減範圍時被移除），
+   所以本節**不能**回答「單純加倍 nlive 是否有效」。
+5. 由於 K.2.2，**每筆沒有真正的時間上限**，兩筆因此各燒掉 4.6–6.0 小時。
+
+## K.8 產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `docs/calibration/bounce_ridge_sampler_pilot.csv` | 21 次執行（base 12 + nact8 9）的設定、耗時、ncall、涵蓋旗標、區間寬度、`M`–`eps_f` 相關 | 是 |
+| `scratchpad/ridge_pilot.py` | pilot 驅動腳本（只讀 production 模組） | 否 |

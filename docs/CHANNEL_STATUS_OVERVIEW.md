@@ -153,11 +153,16 @@ SBC/coverage campaign 的通道。
 
 ### G-1｜GW｜`bounce` 的 `M`/`eps_f` 簡併脊殘留要不要驗證
 
-- **要決定的**：是否投入一輪對照 campaign，驗證提高 `nlive`（或加大 walk 步數）
-  能否消除沿等 `f_rd` 脊方向的 posterior 偏窄。
-- **分類**：**需要更多驗證才能判斷**。已排除的：頻帶邊界效應；已確立的：
-  `f_rd` 本身校準完美（90% coverage 0.900，偏差 +0.00σ）。
-- **細節**：`docs/BOUNCE_PREFLIGHT_AUDIT.md` Part J、
+- **要決定的**：是否投入一輪對照 campaign，驗證提高 `nlive` 能否消除沿等 `f_rd`
+  脊方向的 posterior 偏窄。**加大隨機游走鏈長這條路已經測過並排除**（見下）。
+- **分類**：**需要更多驗證才能判斷**（範圍已縮小）。已排除的：頻帶邊界效應（Part J）、
+  **加大鏈長（Part K）**；已確立的：`f_rd` 本身校準完美（90% coverage 0.900，
+  偏差 +0.00σ）。
+- **階段一 pilot 結果（`b09ef0e`，Part K）**：把 `nact` 從 2 提到 8（平均接受步數
+  4 → 16、成本 4.26 倍）只讓 `w90(M)` 中位數增加 **3.6%**，而缺口需要約 **43%**；
+  9 筆配對樣本的 `in90_M` 1/9 → 2/9，不可與雜訊區分。**未進行階段二。**
+- **尚未測過**：`nlive` 加倍（原計畫的對照組在縮減範圍時被移除）。
+- **細節**：`docs/BOUNCE_PREFLIGHT_AUDIT.md` Part J、**Part K**、
   `docs/BOUNCE_SBC_COVERAGE_REPORT.md`「已知限制」第 1 項。
 
 ### R-1｜radio｜`pbh_tunneling` 先驗尾端集中，SBC 要不要分層抽樣
@@ -243,6 +248,12 @@ SBC/coverage campaign 的通道。
 - **`effective_parameter_names()` 的交集機制在四條通道都正確 fail-closed**
   （`fdf8870` 引入）：該擋的都擋下來了（`grb_frb` on radio、`bh_accretion` 與
   `null` on image、四個模型 on xray），該過的也過了。
+- **第三方設定「看似傳入、實際無效」出現兩次，都在 bilby 2.8.2 的 dynesty 介面**
+  （Part K.2）：`sample='rwalk'` 下 `walks` 完全不被讀取（鏈長由 `nact` 決定），
+  而使用者傳入的 `maxcall` 會被 bilby 覆蓋成自己的 checkpoint 分塊大小。
+  `BilbyRunner.DEFAULT_DYNESTY_KWARGS` 裡的 `walks: 32` 因此是無作用設定——
+  **已回報，未修改**。教訓：驗證設定是否生效要看**行為**（bilby 自己的日誌、
+  ncall 變化），不能看「鍵是否出現在 kwargs 裡」。
 - **`params.get(key, default)` 的靜默預設是重複出現最多次的失效模式**：
   GW（`3.086e22` vs `MPC_M`）、radio（R.4，三組命名）、xray（X.2，十個參數）、
   image（`bh_accretion` 的三個幾何參數）都命中過。radio 已改為 fail-closed
