@@ -53,6 +53,7 @@ from numpy.typing import NDArray
 
 from .base import BaseSimulator, SimData
 from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
+from ..utils.math_utils import kerr_shadow_radius_rg
 from ..utils.targets import require_target
 
 
@@ -61,10 +62,16 @@ from ..utils.targets import require_target
 # and the likelihood.  They are chosen for physical reasonableness, not fitted:
 #
 #  * Brightness rises with accretion rate.  Taken linear in log-log with unit
-#    index, anchored so that an Eddington-rate flow peaks at 10^2 Jy/μas^2;
-#    over the [-5, 0] prior on log10_mdot_edd this spans 10^-3 .. 10^2, which
-#    brackets the ~0.5-1 Jy of compact 230 GHz flux actually seen from M87*
-#    once integrated over a ~250 μas^2 ring.
+#    index, anchored so that an Eddington-rate flow peaks at 1 Jy/μas^2.
+#    CORRECTED: this anchor was 10^2 Jy/μas^2, justified by an integral over a
+#    "~250 μas^2 ring".  That arithmetic was wrong -- the Gaussian annulus
+#    integrates to 2 pi r0 w sqrt(2 pi), which is 660-1900 μas^2 over the
+#    thickness range here -- and it placed the WHOLE prior above reality: the
+#    total flux ran 1.87 Jy at the prior's faint edge to 2.4e4 Jy at its bright
+#    edge, against the 0.5-1.2 Jy of compact 230 GHz flux measured from M87*
+#    (EHT 2019, ApJL 875 L1/L4) and 2.0-2.5 Jy from Sgr A* (EHT 2022, ApJL 930
+#    L12).  At 1 Jy/μas^2 the prior spans 0.019-235 Jy total and both targets
+#    sit near log10_mdot_edd ~ -3, comfortably inside it.  See audit X.13.5.
 #  * Thickness FALLS with accretion rate.  M87* and Sgr A* are radiatively
 #    inefficient flows, geometrically thick (H/R ~ 0.4) at low rates, and a
 #    flow approaching Eddington collapses towards a thin disc (H/R ~ 0.05).
@@ -75,7 +82,7 @@ from ..utils.targets import require_target
 #    is linear in jet_power_frac so the parameter cannot be inert anywhere in
 #    its prior, and the segment sits at the position angle, i.e. along the
 #    projected spin axis, which is where a jet base belongs.
-LOG10_I0_EDD = 2.0                 # log10(Jy/μas^2) at mdot = 1 M_Edd
+LOG10_I0_EDD = 0.0                 # log10(Jy/μas^2) at mdot = 1 M_Edd
 BRIGHTNESS_MDOT_INDEX = 1.0        # d log10 I0 / d log10 mdot
 LOG10_W_FRAC_EDD = math.log10(0.05)  # ring thickness / radius at Eddington
 W_FRAC_MDOT_INDEX = -0.18          # d log10 (w/r) / d log10 mdot
@@ -168,16 +175,26 @@ def ring_emission_from_params(params: dict[str, float]) -> RingEmission:
     )
 
 
-def _shadow_radius_muas(M_msun: float, a_star: float, D_L_mpc: float) -> float:
-    """Angular shadow radius [μas]."""
+def _shadow_radius_muas(
+    M_msun: float,
+    a_star: float,
+    D_L_mpc: float,
+    inclination_rad: float = 0.0,
+) -> float:
+    """Angular shadow radius [μas].
+
+    Delegates the spin/inclination dependence to
+    ``utils.math_utils.kerr_shadow_radius_rg``, a fit to the exact Bardeen
+    critical curve accurate to 0.363%.  This function used to apply a local
+    ``(1 - 0.0136 a + 0.0038 a^2)`` factor whose spin dependence was ~6x too
+    weak, while ``GREternalWhiteHole.photon_ring_radius_m`` applied a different
+    and worse one, so the injected ring and the reported shadow diameter
+    disagreed by up to 28% at high spin.  Both now call one function.
+    """
     rg = G * M_msun * M_SUN / C**2  # gravitational radius [m]
-    # Photon ring approximate: b_c ≈ 3√3 rg for Schwarzschild
-    b_c = 3.0 * np.sqrt(3.0) * rg
-    # For Kerr: approximate correction (Bardeen 1973; prograde-retrograde avg)
-    a = np.clip(np.abs(a_star), 0.0, 0.998)
-    b_c_kerr = b_c * (1.0 - 0.0136 * a + 0.0038 * a**2)
+    b_c = kerr_shadow_radius_rg(a_star, inclination_rad) * rg
     D_L_m = D_L_mpc * MPC_M
-    return float(b_c_kerr / D_L_m / MUAS_RAD)
+    return float(b_c / D_L_m / MUAS_RAD)
 
 
 def _gaussian_ring_image(
@@ -234,16 +251,42 @@ def _compute_visibilities(
     image: NDArray,
     fov_muas: float,
     uv_coverage: NDArray,
-    freq_ghz: float,
+    freq_ghz: float | None = None,
 ) -> NDArray:
     """Sample the Fourier transform of the image at (u,v) coordinates.
 
+    Two things were wrong here and are fixed together, because fixing either
+    one alone leaves the sampler wrong (audit X.13).
+
+    **Baseline units.**  The old code did
+    ``uv_rad = uv_coverage * 1e9 * wavelength_m``.  A baseline quoted in Gλ is
+    *already* an angular frequency -- fringe cycles per radian -- so multiplying
+    by the observing wavelength converts it into the baseline's physical length
+    in metres instead.  At 230 GHz that shrank every EHT baseline by a factor
+    ``1 / 1.3037e-3 = 767``, putting all of them inside the single FFT cell
+    containing the uv origin, where the visibility is just the zero-spacing
+    flux.  Model visibilities were therefore equal to the image's total flux on
+    every baseline and carried no structural information at all.  ``freq_ghz``
+    is consequently no longer used; it is accepted so existing callers keep
+    working.
+
+    **Sampling method.**  The old code FFT'd the image onto a regular uv grid
+    and bilinearly interpolated onto the requested points.  That grid's spacing
+    is ``1 / (2 * fov)``, so the *image* field of view silently sets the *uv*
+    accuracy: at the 50 μas field this project images, the spacing is 2.06 Gλ,
+    and interpolating EHT baselines across it is wrong by up to 9.0% of the peak
+    (measured against the analytic Hankel transform of a Gaussian ring).  A
+    direct DFT evaluated at the requested points has no such coupling; the same
+    check puts it at 0.76%, which is the pixelisation of the image itself rather
+    than the sampler.  It is also cheap, because the transform is separable:
+    ~1.2 ms for a 128x128 image at 16 baselines.
+
     Parameters
     ----------
-    image : ndarray, shape (N, N) [Jy/pixel]
+    image : ndarray, shape (N, N) [Jy/μas^2]
     fov_muas : float — half-width of the image [μas]
     uv_coverage : ndarray, shape (M, 2) — baseline coordinates [Gλ]
-    freq_ghz : float — observing frequency [GHz]
+    freq_ghz : unused; retained for call compatibility.
 
     Returns
     -------
@@ -251,38 +294,17 @@ def _compute_visibilities(
     """
     n_pix = image.shape[0]
     dx_muas = 2.0 * fov_muas / n_pix
+    coords_rad = np.linspace(-fov_muas, fov_muas, n_pix) * MUAS_RAD
 
-    # FFT of image → uv plane (shift zero-freq to centre)
-    image_f = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(image))) * dx_muas**2
+    uv = np.atleast_2d(np.asarray(uv_coverage, dtype=float))
+    # Gλ -> λ, i.e. fringe cycles per radian.  No wavelength factor: see above.
+    u = uv[:, 0] * 1.0e9
+    v = uv[:, 1] * 1.0e9
 
-    # Frequency axis in rad^{-1}
-    freqs_pix = np.fft.fftfreq(n_pix, d=dx_muas * MUAS_RAD) / 1.0  # [rad^{-1}]
-    freqs_pix = np.fft.fftshift(freqs_pix)
-
-    # Convert uv from Gλ to rad^{-1}
-    wavelength_m = C / (freq_ghz * 1e9)
-    uv_rad = uv_coverage * 1e9 * wavelength_m  # Gλ → rad^{-1}
-
-    # Bilinear interpolation of the FFT onto requested (u,v) points
-    from scipy.interpolate import RegularGridInterpolator
-
-    interp_real = RegularGridInterpolator(
-        (freqs_pix, freqs_pix),
-        image_f.real,
-        method="linear",
-        bounds_error=False,
-        fill_value=0.0,
-    )
-    interp_imag = RegularGridInterpolator(
-        (freqs_pix, freqs_pix),
-        image_f.imag,
-        method="linear",
-        bounds_error=False,
-        fill_value=0.0,
-    )
-    vis_real = interp_real(uv_rad[:, ::-1])
-    vis_imag = interp_imag(uv_rad[:, ::-1])
-    return vis_real + 1j * vis_imag
+    # V(u, v) = ∫∫ I(x, y) exp(-2πi (ux + vy)) dx dy, separable in x and y.
+    phase_x = np.exp(-2.0j * np.pi * np.outer(u, coords_rad))  # (M, N)
+    phase_y = np.exp(-2.0j * np.pi * np.outer(v, coords_rad))  # (M, N)
+    return np.einsum("mx,yx,my->m", phase_x, image, phase_y) * dx_muas**2
 
 
 class ImageShadowSimulator(BaseSimulator):
@@ -327,7 +349,7 @@ class ImageShadowSimulator(BaseSimulator):
         pos_angle = _require_param(params, "position_angle", "image")
         emission = ring_emission_from_params(params)
 
-        r_ring = _shadow_radius_muas(M, a, D_L)
+        r_ring = _shadow_radius_muas(M, a, D_L, inclination_rad=i)
         w_ring = r_ring * emission.ring_width_frac
         axial_ratio = float(np.abs(np.cos(i)))
 
@@ -385,7 +407,28 @@ class ImageShadowSimulator(BaseSimulator):
 
 
 def _compute_closure_phases(visibilities: NDArray) -> NDArray:
-    """Compute closure phases for sequential baseline triplets."""
+    """Phase closure statistic over sequential baseline triplets.
+
+    KNOWN LIMITATION, recorded rather than silently tolerated: the triplets are
+    taken as consecutive entries of the visibility array, and the shipped
+    ``_default_eht_uv()`` baselines do not close -- for triplet 0,
+    ``(0.5, 0.2) + (0.5, -0.2) = (1.0, 0.0)``, not the third entry
+    ``(0.2, 0.5)``.  So this is a phase combination, not a closure phase, and
+    it does NOT carry the station-gain invariance closure phases exist for.
+    Both the simulator and the likelihood compute it with this same function,
+    so it is a self-consistent statistic of the data and does not bias
+    inference; it simply is not the robust observable its name claims.  Fixing
+    it means deriving the uv coverage from the station positions in
+    configs/instruments/eht.yaml so real triangles exist.  See
+    docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.13.4.
+
+    The wrap below used to be ``closure % (2π) - π``, which maps a zero phase
+    closure to -π rather than to 0 -- a constant π offset from the convention
+    ``EHTLoader.compute_closure_phases`` uses.  The von Mises likelihood
+    compares model against data through this same function, so the offset
+    cancelled there, but the values stored in the observation metadata were
+    wrong by π.
+    """
     n = len(visibilities)
     n_triangles = n // 3
     phases = np.angle(visibilities)
@@ -393,7 +436,7 @@ def _compute_closure_phases(visibilities: NDArray) -> NDArray:
     for k in range(n_triangles):
         i, j, l = 3 * k, 3 * k + 1, 3 * k + 2
         closure[k] = phases[i] + phases[j] - phases[l]
-    return closure % (2.0 * np.pi) - np.pi  # wrap to (-π, π]
+    return (closure + np.pi) % (2.0 * np.pi) - np.pi  # wrap to (-π, π]
 
 
 def _default_eht_uv() -> NDArray:

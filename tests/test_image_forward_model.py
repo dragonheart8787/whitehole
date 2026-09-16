@@ -39,19 +39,20 @@ CTX = {"target": "M87*", "thermal_noise_jy": 0.05, "freq_ghz": 230.0,
 
 @pytest.fixture(scope="module")
 def observation():
-    """A draw whose ring the grid can actually represent.
+    """An ordinary prior draw.
 
-    M is pinned rather than sampled.  The distance is no longer free -- it
-    comes from the target -- but at M87*'s 16.8 Mpc the shipped 200 μas / 128 px
-    grid can only represent M >= 8.44e9 M_sun, so a prior draw would still land
-    below the floor 86.7% of the time and every test below would pass or fail
-    for the wrong reason.  That residual is measured in
-    tests/test_image_target_and_accretion.py.
+    It no longer has to be doctored.  Historically M and D_L had to be pinned
+    because 80.98% of the prior imaged exactly zero, and after the distance
+    became a per-target constant M still had to be pinned because the 200 μas
+    field's 3.125 μas pixels could not represent M87*'s ring.  With the field
+    sized to the source (50 μas / 128 px) the whole mass prior is representable,
+    so a plain draw is a fair test.
     """
     model = get_model("gr_eternal", target="M87*")
     theta = model.sample_prior(np.random.default_rng(3))
-    theta = {**theta, "M": 9.5e9, "ring_width_frac": 0.2}
-    assert _shadow_radius_muas(theta["M"], theta["a_star"], 16.8) > 25.8
+    theta = {**theta, "ring_width_frac": 0.2}
+    lo, hi = GREternalWhiteHole.ring_radius_representable_range_muas()
+    assert lo < _shadow_radius_muas(theta["M"], theta["a_star"], 16.8) < hi
     data = get_simulator("image").simulate(
         theta, CTX, rng=np.random.default_rng(11)
     )
@@ -182,7 +183,17 @@ class TestRingRepresentability:
         )
         assert cfg["imaging"]["fov_muas"] == IMAGE_FOV_MUAS
         assert cfg["imaging"]["n_pixels"] == IMAGE_N_PIXELS
-        assert IMAGE_PIXEL_MUAS == pytest.approx(3.125)
+        assert IMAGE_PIXEL_MUAS == pytest.approx(0.78125)
+
+    def test_cli_reads_the_same_yaml_rather_than_a_second_copy(self):
+        """cli.py used to carry n_pixels: 64 against the YAML's 128."""
+        from whitesearch.cli import _default_context
+        from whitesearch.dataio.eht import eht_imaging_config
+
+        ctx = _default_context("image")
+        cfg = eht_imaging_config()
+        assert ctx["fov_muas"] == cfg["fov_muas"] == IMAGE_FOV_MUAS
+        assert ctx["n_pixels"] == cfg["n_pixels"] == IMAGE_N_PIXELS
 
     def test_window_is_derived_from_the_grid(self):
         lo, hi = GREternalWhiteHole.ring_radius_representable_range_muas()
@@ -194,24 +205,26 @@ class TestRingRepresentability:
         )
         assert lo2 == pytest.approx(lo / 2.0)
 
-    def test_the_floor_lands_on_top_of_the_real_targets(self):
-        """KNOWN DEFICIENCY: the floor is not comfortably below the targets.
+    def test_the_floor_now_sits_below_both_real_targets(self):
+        """RESOLVED.  This test used to record the opposite.
 
-        The two sources this channel exists to describe sit either side of it:
-        M87* at 19.67 muas is BELOW the 25.77 muas floor, Sgr A* at 25.80 muas
-        is barely above.  So the shipped grid cannot faithfully represent a thin
-        ring at M87*'s scale.  Fixing the distance per target did not change
-        this -- it is a property of the grid, not of the prior -- and it is
-        still recorded rather than fixed; see docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md
-        X.11.1 and the I-3 entry in docs/CHANNEL_STATUS_OVERVIEW.md.
+        At the old 200 μas field the representability floor was 25.77 μas,
+        above M87*'s ring entirely, so the shipped grid could not represent a
+        thin ring at the mass this channel exists to measure.  Sizing the field
+        to the source puts the floor at 6.44 μas, comfortably below both.
+
+        The ring radii themselves also moved, because the Kerr shadow formula
+        was corrected: at a* = 0.9 the old expression was ~4.7% too large.
         """
         lo, hi = GREternalWhiteHole.ring_radius_representable_range_muas()
+        assert lo == pytest.approx(6.4414, abs=0.001)
         r_m87 = _shadow_radius_muas(6.5e9, 0.9, 16.8)
-        r_sgra = _shadow_radius_muas(4.15e6, 0.9, 0.008178)
-        assert r_m87 == pytest.approx(19.667, abs=0.01)
-        assert r_sgra == pytest.approx(25.795, abs=0.01)
-        assert r_m87 < lo, "M87* sits below the representability floor"
-        assert lo < r_sgra < hi
+        r_sgra = _shadow_radius_muas(4.154e6, 0.9, 0.008178)
+        assert r_m87 == pytest.approx(18.778, abs=0.01)
+        assert r_sgra == pytest.approx(24.653, abs=0.01)
+        for r in (r_m87, r_sgra):
+            assert lo < r < hi
+            assert r > 2.0 * lo, "and with margin, not just barely"
 
     def test_fixing_the_distance_collapsed_the_prior_ring_spread(self):
         """The prior-side half of X.6, measured before and after.
@@ -231,5 +244,8 @@ class TestRingRepresentability:
         ])
         spread_dex = np.log10(r.max() / r.min())
         assert spread_dex < 0.55, "mass prior alone is 0.523 dex wide"
-        # No draw produces the exactly-zero image that 80.98% of the old prior did.
+        # No draw produces the exactly-zero image that 80.98% of the old prior
+        # did, and none falls below the representability floor either.
+        lo, hi = GREternalWhiteHole.ring_radius_representable_range_muas()
         assert (r < IMAGE_PIXEL_MUAS).mean() == 0.0
+        assert ((r >= lo) & (r <= hi)).all()

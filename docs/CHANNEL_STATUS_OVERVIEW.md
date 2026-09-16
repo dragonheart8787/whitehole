@@ -21,7 +21,7 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.12） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.13） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -94,37 +94,36 @@ SBC/coverage campaign 的通道。
 
 ### image / VLBI（`gr_eternal`、`bh_accretion`）
 
-**成熟度：模型層與先驗層已到位，但可見度取樣有一個阻斷性錯誤。**
-從未跑過任何 SBC/campaign，**目前也還不該跑**（見 I-4）。
+**成熟度：forward model 與先驗皆已到位，具備跑一次有意義校準的條件。**
+仍未跑過任何 SBC/campaign，所以**沒有任何 coverage 證據**。
 
 | 已完成的修正 | commit |
 |---|---|
 | `uv_coverage` 改為從資料取得（缺少則 fail-closed）；closure phase 不再安靜退化；`null` 接上取樣維度；環半徑可表示範圍推導進程式碼 | `018b022` |
-| `D_L` 改為逐目標已知常數（`target` 欄位、metadata→context、fail-closed）；`gr_eternal` 取樣維度 7→6；M 先驗改為逐目標、出處進註解；`bh_accretion` 實作為真正不同的假說（吸積率驅動亮度+厚度、噴流足點打破方位角對稱）；四個幾何參數不再走靜默預設 | 本輪 |
+| `D_L` 改為逐目標已知常數（`target` 欄位、metadata→context、fail-closed）；`gr_eternal` 取樣維度 7→6；M 先驗改為逐目標、出處進註解；`bh_accretion` 實作為真正不同的假說；四個幾何參數不再走靜默預設 | `ad4f43a` |
+| uv 基線尺度修正（Gλ 即角頻率，不再乘波長）＋改用直接 DFT 取樣；mock 路徑同步修正；成像 FoV 200→50 μas；`n_pixels` 改為單一讀取點；Kerr 陰影半徑統一為對精確臨界曲線的擬合；`bh_accretion` 亮度歸一化修正 100 倍 | 本輪 |
 
-稽核：`d4b3178`、X.12。
+稽核：`d4b3178`、X.12、X.13。
+
+**修正後的狀態（量測值）：**
+
+| 指標 | 值 |
+|---|---|
+| 先驗抽樣的環可被表示 | **100%**（兩模型 × 兩目標；曾是 18.29% → 13.29%） |
+| 可見度取樣對解析 Hankel 變換的偏差 | **0.76%**（曾是「每條基線都等於總流量」） |
+| 宣告參數全部同時影響資料與 lnL | **兩個模型皆全部**（`position_angle` 從 4.14e−4 變成 0.392） |
+| 先驗抽樣 SNR ≥ 8 的比例 | `gr_eternal` **81.2%**、`bh_accretion` **66.0%**（GW 通道是 0.785%） |
+| 總流量真值是否在先驗內 | 是，兩目標都在 `log10_mdot_edd ≈ −3` |
 
 **已知限制：**
 
 | 項目 | 分類 |
 |---|---|
-| `_compute_visibilities()` 的 Gλ→rad⁻¹ 換算多乘了波長，16 條基線全部落在 uv 原點的格子裡，**可見度只帶總流量、不帶結構**；`position_angle` 因此改影像 ~100% 但只改可見度 4.14e−4 | **阻斷性，已回報未修**（見待決策 I-4） |
-| shipped 的 200 μas / 128 px 網格只表示得了 M87\* 質量先驗的 **13.29%**、Sgr A\* 的 **52.39%**；下界 25.77 μas 高於 M87\* 的 19.66 μas | **需要你做一個設計決定**（見待決策 I-3） |
-| `cli.py` 的預設 `n_pixels: 64` 與 `eht.yaml` 的 `128` 不一致；64 px 下兩個目標都是 0% 可表示 | **需要你做一個設計決定**（同 I-3） |
-| 影像網格對薄環的響應**非單調**（3 px 0.1217、4 px 0.0003、5 px 0.9749），是取樣假影 | **已定性但選擇不修** |
-| `gr_eternal.summary_stats` 走 `photon_ring_radius_m()`（Chan+2015 外光子軌道），模擬器走 `_shadow_radius_muas()`（Bardeen 近似），兩者在 a\* ≠ 0 時不同 | **新發現，已記錄未修** |
+| `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
+| **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」 | 待執行 |
+| 影像網格對薄環的響應**非單調**（3 px 0.1217、4 px 0.0003、5 px 0.9749），是取樣假影；現行網格下兩個目標都遠在下界之上，實務上不觸發 | **已定性但選擇不修** |
 | image 通道沒有 preprocess 模組 | **需要你做一個設計決定** |
-
-**已解除的限制：** 環半徑先驗的**先驗側**問題已解決——固定 `D_L` 後環半徑的先驗
-展寬從 7.301 dex 降到 0.523 dex（M87\*）/ 0.155 dex（Sgr A\*），在可表示的網格上
-先驗抽樣不再產生任何一張精確為零的影像。剩下的是網格側，見 I-3。
-
-**真實資料路徑：⚠️ 格式相容但未接。** `EHTLoader` 的 record 可直接餵進
-`VisibilityLikelihood`（實測回傳有限值），但 `loader.py` 的 `eht` 分支未實作
-（fail-closed，需 `--allow-mock-fallback`）；且該 record **沒有 `closure_phases` 鍵**，
-接上後會被新的 fail-closed 檢查擋下（這是刻意的）。
-
----
+| `null` 模型無法注入到 image 通道（模擬器沒有 null 分支，`M` 缺失即 raise）。這是 `cda3003` 之前就有的行為，不是本輪引入 | **已定性，未修** |
 
 ### xray
 
@@ -202,85 +201,74 @@ SBC/coverage campaign 的通道。
   （修正前分別是 1.355% / 0.465%）。
 - **細節**：`docs/RADIO_PREFLIGHT_AUDIT.md` R.6、R.13、R.15.5–R.15.6。
 
-### I-1｜image｜`bh_accretion` 要走 A / B / C 哪一條 —— **已實作（選 C）**
+### I-1｜image｜`bh_accretion` 要走 A / B / C 哪一條 —— **已完成**
 
-- **決定**：走 **C**（擴充 `ImageShadowSimulator`），作法比照 GW 通道
-  `bh_ringdown` 的 `log10_A`——宣告一條唯象標度律，不做第一原理 GRMHD。
-- **實作內容**：`log10_mdot_edd` **同時**決定峰值面亮度與環厚度
-  （輻射低效吸積流在低吸積率下幾何厚、趨近 Eddington 轉薄），
-  `jet_power_frac` 在投影自轉軸方向的環段上加亮（足點方位角半寬 ~34°，
-  `f_jet = 1` 時 4 倍對比）。兩條標度律只寫在
-  `ring_emission_from_params()` 一處，simulator 與 likelihood 共用。
-- **取樣維度**：`M, a_star, i, position_angle, log10_mdot_edd, jet_power_frac`（6）。
-  與 `gr_eternal` 的交集只有四個幾何參數。
-- **與 `gr_eternal` 的實測差異**（相同真值、同環半徑／厚度／峰值亮度）：
-  影像最大相對差 **89.8%**；對 180° 旋轉的不對稱度 **0.473** vs **0.0**（精確）；
-  同一筆資料上的 lnL 差 **6.32e6**。
-- **未達成的部分（如實記錄）**：逐參數活性測試要求每個宣告的參數都同時改變
-  simulator 輸出與 lnL。六個參數中**五個達成**，`position_angle` 沒有——
-  它改影像約 100%，改可見度只有 4.14e−4。**原因不在這個模型，在 I-4。**
-- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.3。
+- **決定**：走 **C**（擴充 `ImageShadowSimulator`），比照 GW 通道
+  `bh_ringdown` 的 `log10_A`——宣告唯象標度律，不做第一原理 GRMHD。
+- `log10_mdot_edd` **同時**決定峰值亮度與環厚度；`jet_power_frac` 在投影
+  自轉軸方向加亮環段。兩條標度律只寫在 `ring_emission_from_params()` 一處。
+- **逐參數活性：六個宣告參數全部同時改變 simulator 輸出與 lnL。**
+  上一輪 `position_angle` 未達成（4.14e−4），原因是 I-4，已隨之解決（0.392）。
+- 與 `gr_eternal` 在相同真值下的差異：影像最大相對差 89.8%、
+  180° 旋轉不對稱度 0.473 vs 0.0、同一筆資料的 lnL 差 387。
+- **後續修正**：亮度歸一化 `LOG10_I0_EDD` 原為 2.0，使整個先驗的總流量
+  （1.87–2.4e4 Jy）都在 M87\* 實測 0.5–1.2 Jy 之上——**真值落在先驗外**。
+  這是上一輪引入的算術錯誤（環面積算錯，且錨定峰值而非積分），
+  已改為 0.0，先驗改跨 0.019–235 Jy。詳見 X.13.5。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.3、X.13.5。
 
-### I-2｜image｜環半徑要不要重新參數化 —— **已實作（`D_L` context 化）**
+### I-2｜image｜環半徑要不要重新參數化 —— **已完成**
 
-- **決定**：不做比值重新參數化，改成**把 `D_L` 當成逐目標已知常數**。
-  VLBI 影像約束的是角半徑，距離不是這條通道量的東西；把它從取樣向量拿掉
-  之後，`r ∝ M / D_L` 的不可辨識方向就不存在了。
-- **機制**：比照 GW 通道 `GWLikelihood._parse_data` 的
-  `meta.get(..., context.get(...))`（observation metadata 優先、context 次之），
-  唯一差別是**沒有第三層預設值**——缺 `target` 直接 raise。
-  新增 `target` 欄位而非重用 `EHTLoader` 既有的 `source`
-  （後者在 GW/radio 上代表資料來源證跡，語意衝突）。
-- **常數與出處**：M87\* 16.8 Mpc（EHT 2019 ApJL 875 L6）、
-  Sgr A\* 0.008178 Mpc（GRAVITY 2019 A&A 625 L10）；
-  質量先驗 `[3.0e9, 1.0e10]` 與 `[3.5e6, 5.0e6]`，寬度照文獻上的**獨立測量**訂
-  （Gebhardt+2011 / Walsh+2013；Do+2019），**不是照網格可表示範圍反推的**。
-- **成果**：環半徑的先驗展寬 7.301 dex → **0.523 dex**（M87\*）/
-  **0.155 dex**（Sgr A\*）；在可表示的網格上，先驗抽樣不再產生任何一張
-  精確為零的影像（原本 80.98%）。
-- **未達成的部分（如實記錄）**：可表示比例**沒有接近 100%**——
-  shipped 網格下 M87\* **13.29%**、Sgr A\* **52.39%**。這是網格的限制，
-  不是先驗的，所以**沒有為了讓數字好看而收窄先驗**。轉為 I-3。
+- **決定**：不做比值重新參數化，改成把 `D_L` 當成逐目標已知常數。
+- 環半徑的先驗展寬 7.301 dex → 0.523 dex（M87\*）/ 0.155 dex（Sgr A\*）。
+- 上一輪殘留的「可表示比例未達 100%」已由 I-3 解決（見下）。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.1、X.12.2。
 
-### I-3｜image｜成像網格要不要重新設定（FoV 或 `n_pixels`）
+### I-3｜image｜成像網格要不要重新設定 —— **已完成**
 
-- **要決定的**：`configs/instruments/eht.yaml` 的 `imaging.fov_muas = 200.0`
-  對一個 20–31 μas 的環而言約大了一個數量級；可表示下界
-  `8.245 px × pixel` 因此落在 25.77 μas，高於 M87\* 的環。兩條可行的槓桿：
+- **決定**：`configs/instruments/eht.yaml` 的 `imaging.fov_muas` 200.0 → **50.0**
+  （`n_pixels` 維持 128）。200 μas 半寬對 20–25 μas 的環大了約一個數量級。
 
-  | 槓桿 | M87\* | Sgr A\* |
-  |---|---|---|
-  | 固定 FoV = 200 μas，需要的 `n_pixels` | ≥ **364** | ≥ **152** |
-  | 固定 `n_pixels` = 128，可用的 FoV 半寬 | **[30.24, 70.42] μas** | **[31.06, 168.76] μas** |
+  | 網格 | 像素 | 可表示下界 | M87\* | Sgr A\* |
+  |---|---|---|---|---|
+  | 200 μas / 64 px（cli.py 舊值） | 6.25 μas | 51.53 μas | 0% | 0% |
+  | 200 μas / 128 px（yaml 舊值） | 3.125 μas | 25.77 μas | 7.92% | 34.23% |
+  | **50 μas / 128 px** | **0.781 μas** | **6.44 μas** | **100%** | **100%** |
 
-  **FoV = 50 μas / 128 px 下兩個目標都是 100% 可表示**，且先驗中最大的環
-  （31.06 μas）仍安穩落在視野內。順帶要決定 `cli.py` 的 `n_pixels: 64`
-  與 yaml 的 `128` 誰是對的（64 px 下兩個目標都是 0%）。
-- **分類**：**需要你做一個設計決定**。推導已進程式碼
-  （`mass_representable_range_msun` / `mass_prior_representable_fraction` /
-  `required_n_pixels_for_prior` / `required_fov_muas_for_prior`），
-  數字全部由測試鎖住；**沒有自行改動 shipped 設定**。
-- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.2。
+- **先驗完全沒有動**，仍由文獻上的獨立質量測量決定；改的是分析設定。
+- `n_pixels` 不一致同時處理：新增 `dataio.eht.eht_imaging_config()` 作為唯一
+  讀取點，`cli.py` 不再另寫一份；找不到設定檔時 fail-closed。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.6。
 
-### I-4｜image｜`_compute_visibilities()` 的 Gλ → rad⁻¹ 換算 —— **阻斷性**
+### I-4｜image｜`_compute_visibilities()` 的 Gλ → rad⁻¹ 換算 —— **已修正**
 
-- **問題**：`uv_rad = uv_coverage * 1e9 * wavelength_m`。以 Gλ 為單位的基線
-  本來就是「每弧度幾個週期」，乘上波長得到的是**基線物理長度（公尺）**。
-  230 GHz 下等於把每條基線縮小 767 倍，16 條全部落進 uv 原點所在的那一個
-  FFT 格子（間距 2.06e9 rad⁻¹，落點 < 8.5e6）。
-- **後果（已量測）**：模型可見度在**每條基線上都等於影像總流量**
-  （165.68 vs 總流量 165.70 Jy，相對散布 1.3e−3）。正確取樣下同一張影像的
-  `|V|` 應該散布在 39.7–163.7 Jy。`position_angle` 0.7→1.9 的
-  `max|ΔV|/max|V|`：現行 **4.14e−4**，正確取樣 **0.571**（逐基線 33–2385 σ）。
-- **意義**：**image 通道的可見度目前不帶任何影像結構資訊，只帶總流量。**
-  其他五個參數之所以還「活著」，是因為它們都會改變總流量，
-  不是因為通道量到了環的形狀。
-- **影響範圍**：同樣的換算也在 `dataio/eht.py::_mock_eht_data()`，
-  所以不是「改一行」；修正會改變 image 通道**每一個**既有數字。
-- **分類**：**阻斷性問題，依規則回報後停下，未在本輪修正。**
-  在這個修好之前，image 通道的 SBC 不會是有意義的校準。
-- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.5。
+- **問題**：以 Gλ 為單位的基線本身就是角頻率，原本又乘了一次波長，
+  等於把每條基線縮小 767 倍，16 條全部落進 uv 原點的格子，模型可見度在
+  每條基線上都等於總流量。同樣的換算也在 `dataio/eht.py::_mock_eht_data()`。
+- **修正**：兩處都改為 `uv * 1e9`；並把取樣方式從「FFT + 內插」改成
+  **在要求的 (u,v) 點上直接做 DFT**——因為 FFT 網格間距是 `1/(2·FoV)`，
+  讓影像視野悄悄決定 uv 精度，在 I-3 要求的 50 μas 視野下誤差達 8.96%。
+  直接 DFT 把兩者解耦，對解析解的偏差 0.76%，成本約 1.2 ms。
+- **外部物理檢查**（非內部前後比較）：點源條紋相位、V(0,0) = 總流量、
+  42 μas 環的第一極小在 3.74 Gλ（理論 3.76、EHT 2019 觀測 ~3.4）、
+  最長基線相關流量落在幾十 mJy。
+- **`position_angle` 修正前後**：`max|ΔV|/max|V|` 9.59e−4 → **0.570**（×595）、
+  相位 8.67e−4 → **2.80 rad**（×3225）。診斷曾預測 0.571，實測 0.570。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.1、X.13.2。
+
+### I-5｜image｜closure phase 的三元組不閉合
+
+- **問題**：`_compute_closure_phases()` 取可見度陣列的連續三個元素當三角形，
+  但 `_default_eht_uv()` 是一串基線而非台站陣列，**沒有任何一組滿足
+  u_ij + u_jk = u_ik**。所以它是相位組合而不是 closure phase，
+  不具備台站增益不變性。
+- **不造成推論偏差**：simulator 與 likelihood 用同一個函式，是資料的自洽
+  統計量。但若在報告中宣稱使用 closure phase，這一點必須說清楚。
+- **要決定的**：是否從 `configs/instruments/eht.yaml` 的台站座標推導 uv 覆蓋，
+  讓真正的三角形存在。
+- **分類**：**需要你做一個設計決定**。順帶已修：wrap 的 off-by-π
+  （`closure % 2π − π` 把零閉合映到 −π）。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.4。
 
 ### X-1｜xray｜整條通道要不要投入實作
 
@@ -323,14 +311,14 @@ SBC/coverage campaign 的通道。
 - **可直接推算的**：以修正後 SNR ≥ 8 的比例 0.785% 計，N=100 的 campaign
   期望只有 **約 0.8 筆**注入帶有可偵測訊號；N=1000 約 8 筆。
 
-### I-3 / I-4 若要跑 image SBC
+### image SBC
 
 - **沒有任何 image campaign 的耗時量測。**
-- **先決條件**：**I-4 未修之前不建議跑**——可見度只帶總流量，
-  跑出來的 SBC 校準的是「總流量模型」，不是影像模型。
-- **可直接推算的**（先驗側已修好之後）：shipped 的 200 μas / 128 px 網格下，
-  M87\* 有 **13.29%** 的注入環可被表示（N=100 約 13 筆）、
-  Sgr A\* **52.39%**（約 52 筆）。若採 FoV = 50 μas / 128 px，兩者都是 100%。
+- **先決條件已滿足**：I-4 已修，可見度帶影像結構；I-3 已修，先驗 100% 可表示。
+- **可直接推算的**：先驗抽樣 SNR ≥ 8 的比例是 `gr_eternal` **81.2%**、
+  `bh_accretion` **66.0%**，所以 N=100 的 campaign 期望有 66–81 筆帶可偵測訊號
+  （對照 GW 通道的 0.785%，約 0.8 筆）。
+- **取樣維度**：兩個模型都是 6 維。單次 likelihood 評估的可見度計算約 1.2 ms。
 
 ### X-1 若要實作 xray
 
@@ -361,16 +349,33 @@ SBC/coverage campaign 的通道。
   GW（`3.086e22` vs `MPC_M`）、radio（R.4，三組命名）、xray（X.2，十個參數）、
   image（`bh_accretion` 的三個幾何參數）都命中過。radio 已改為 fail-closed
   （`824392e`）；image 的四個幾何參數也已改為明確要求（X.12.3）；xray 未改。
+- **「同一個數字寫在兩個地方」出現一次**：`cli.py` 的 `n_pixels: 64` 對上
+  `eht.yaml` 的 128，而且兩者不只是不同、是對「這條通道能不能用」有相反
+  的答案（64 px 下兩個目標都是 0% 可表示）。已改為單一讀取點並 fail-closed。
 - **「算了但沒用」的死程式碼**出現兩次：`bounce` 的爆發成分（B.3）、
   radio `burst_fluence_jy_ms()` 的 `W_obs_ms`（R.15.1，判定為應刪除而非應接線）。
 - **「先驗跨度遠大於儀器可表示範圍」出現四次**，嚴重度遞增：
   GW `M`（B.5，14.06% 被拒）→ radio `W_int`（R.7，11.88% 次格寬）→
   xray `T90`（X.3，49.96% 次格寬）→ image 環半徑（X.6，**80.98%** 次像素）。
-  image 的這一項已處理：把 `D_L` 變成逐目標已知常數之後先驗側歸零，
-  殘留的 13.29% / 52.39% 是**網格**表示不了先驗，不是先驗太寬（X.12.2、I-3）。
+  **image 這一項已完全解決**：`D_L` 變成逐目標已知常數消掉先驗側（X.12.2），
+  成像視野縮到與源同尺度消掉網格側（X.13.6），現在是 100% 可表示。
+  兩步都沒有動先驗本身——先驗一直是由文獻上的獨立測量決定的。
 - **「單位換算錯誤」是第三次出現的類型**：GW 的 `3.086e22` vs `MPC_M`
   （相對差 1.0449e−4，偏了 D_L）、radio 的 Jy·ms → erg/cm²（X-1(c) 仍未決），
-  以及 image 的 Gλ → rad⁻¹（**767 倍**，I-4）。前兩者量級小或已知未接，
-  image 這一次的後果是整條通道的可見度失去結構資訊。
+  以及 image 的 Gλ → rad⁻¹（**767 倍**，I-4，已修）。
+- **對稱的尺度／單位錯誤不會被 forward-model 一致性檢查抓到，需要獨立的
+  物理現實檢查。** 這是這個專案到目前為止最重要的一課，案例是 I-4：
+  `simulators/image_shadow.py::_compute_visibilities()` 與
+  `dataio/eht.py::_mock_eht_data()` 用了**同一個**錯誤的 Gλ → rad⁻¹ 換算，
+  所以模型與資料互相比較時**完全自洽**——注入／回收自洽、simulator 與
+  likelihood 自洽、SBC 也會通過——但兩邊都錯，可見度只帶總流量、不帶任何
+  影像結構。這一類錯誤對「把兩邊對起來」的檢查是隱形的，只有拿**外部**
+  基準才看得出來：這次用的是高斯環的解析 Hankel 變換（第一極小應在
+  2.405/(2π r₀) = 3.76 Gλ，實測 3.74）、點源的條紋相位、以及 EHT 實測的
+  相關流量量級。同一輪裡另外兩個問題也是靠同一種檢查才發現的——
+  `bh_accretion` 的亮度歸一化讓整個先驗都在 M87\* 實測流量之上（X.13.5），
+  以及 Kerr 陰影半徑的兩個公式**都**偏離精確臨界曲線（X.13.3）。
+  **教訓：forward-model 一致性是必要條件，不是充分條件。每一個把物理量
+  轉成儀器量的換算，都要另外對一個不是本專案產生的數字。**
 - **preprocess 模組的接線狀況不一致**：GW 有接（`gw_observation.py`），
   radio 與 xray 的 preprocessor 沒有任何呼叫端，image 根本沒有模組。

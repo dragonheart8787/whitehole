@@ -260,7 +260,13 @@ class VisibilityLikelihood(BaseLikelihood):
         """
         D_L = require_target(context).distance_mpc
         emission = ring_emission_from_params(theta)
-        theta_d = 2.0 * _shadow_radius_muas(theta["M"], theta["a_star"], D_L)
+        # inclination_rad matters: the Kerr shadow's areal radius depends on the
+        # viewing angle at the ~2% level, and the simulator passes it.  Omitting
+        # it here would reintroduce, in miniature, exactly the model-vs-simulator
+        # ring-size disagreement that audit X.13.3 closed.
+        theta_d = 2.0 * _shadow_radius_muas(
+            theta["M"], theta["a_star"], D_L, inclination_rad=theta["i"]
+        )
 
         return {
             "theta_d_muas": theta_d,

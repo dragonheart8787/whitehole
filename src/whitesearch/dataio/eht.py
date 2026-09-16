@@ -49,6 +49,43 @@ EHT_2017_PARAMS = {
 }
 
 
+#: Where the EHT instrument configuration lives, relative to the repo root.
+EHT_CONFIG_PATH = Path("configs/instruments/eht.yaml")
+
+
+def eht_imaging_config() -> dict[str, Any]:
+    """Imaging grid and noise level from ``configs/instruments/eht.yaml``.
+
+    One reader, so the field of view and pixel count are not written down twice.
+    ``cli.py`` used to carry its own ``n_pixels: 64`` next to the YAML's 128;
+    at 64 px the representability floor is 51.53 μas and *neither* target's
+    ring can be represented at all, so the two copies did not merely differ,
+    they disagreed about whether the channel worked.
+
+    Fail-closed on a missing or malformed file rather than falling back to
+    in-code numbers: a silent fallback is how the two copies drifted apart.
+    """
+    import yaml
+
+    for base in (Path.cwd(), Path(__file__).resolve().parents[3]):
+        path = base / EHT_CONFIG_PATH
+        if path.exists():
+            cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            imaging = cfg.get("imaging")
+            if not imaging:
+                raise KeyError(f"{path} has no 'imaging' block")
+            return {
+                "fov_muas": float(imaging["fov_muas"]),
+                "n_pixels": int(imaging["n_pixels"]),
+                "thermal_noise_jy": float(imaging["thermal_noise_jy"]),
+                "freq_ghz": float(cfg["observing_frequency_ghz"]),
+            }
+    raise FileNotFoundError(
+        f"EHT instrument config {EHT_CONFIG_PATH} not found; it is the single "
+        "source of truth for the image channel's imaging grid."
+    )
+
+
 class EHTLoader:
     """Interface for EHT public data products.
 
@@ -224,17 +261,30 @@ class EHTLoader:
         uv = _default_eht_uv()
         n_baselines = len(uv)
 
-        # Mock M87*-like ring: shadow ~ 40 μas
-        ring_size_muas = 40.0 if canonical == "M87*" else 50.0
+        # Measured ring DIAMETERS: 42 muas for M87* (EHT 2019, ApJL 875 L1) and
+        # 51.8 muas for Sgr A* (EHT 2022, ApJL 930 L12).
+        ring_diameter_muas = 42.0 if canonical == "M87*" else 51.8
         from ..utils.constants import MUAS_RAD
-        ring_rad = ring_size_muas * MUAS_RAD
+        ring_radius_rad = 0.5 * ring_diameter_muas * MUAS_RAD
 
-        freq_hz = 230e9
-        from ..utils.constants import C
-        wavelength_m = C / freq_hz
-        uv_rad = uv * 1e9 * wavelength_m
+        # Gλ -> λ (fringe cycles per radian).  This used to multiply by the
+        # observing wavelength as well, which converts a baseline in Gλ into its
+        # physical length in metres and shrank every baseline by 767x at
+        # 230 GHz; the identical error was in
+        # simulators.image_shadow._compute_visibilities, so the two agreed with
+        # each other and no forward-model consistency check could see it.
+        # See docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.13.
+        uv_lambda = uv * 1e9
+        uv_radial = np.hypot(uv_lambda[:, 0], uv_lambda[:, 1])
 
-        vis_amp = np.sinc(uv_rad[:, 0] * ring_rad) * np.sinc(uv_rad[:, 1] * ring_rad)
+        # Thin circular ring of radius r: V(u) = F J0(2 pi r u).  Previously a
+        # separable product of two sincs, which is the transform of a rectangle,
+        # not of the ring this record claims to hold.  That only became visible
+        # once the baselines stopped landing on the uv origin, where every
+        # transform equals the zero-spacing flux.
+        from scipy.special import j0
+        total_flux_jy = 1.0  # M87* compact flux at 230 GHz is ~0.5-1.2 Jy
+        vis_amp = total_flux_jy * j0(2.0 * np.pi * ring_radius_rad * uv_radial)
         vis_phase = rng.uniform(-np.pi, np.pi, n_baselines)
         visibilities = vis_amp * np.exp(1j * vis_phase)
         sigma = rng.uniform(0.02, 0.1, n_baselines)

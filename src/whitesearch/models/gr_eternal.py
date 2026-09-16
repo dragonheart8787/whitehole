@@ -17,6 +17,7 @@ import numpy as np
 
 from .base import BaseModel, ParameterSpec
 from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
+from ..utils.math_utils import kerr_shadow_radius_rg
 from ..utils.targets import ImageTarget, get_target
 
 
@@ -26,9 +27,9 @@ from ..utils.targets import ImageTarget, get_target
 # against that file, so the YAML stays the source of truth without a model
 # doing import-time file IO (same convention as BAND_LOW_HZ/BAND_HIGH_HZ on the
 # GW side).
-IMAGE_FOV_MUAS = 200.0
+IMAGE_FOV_MUAS = 50.0
 IMAGE_N_PIXELS = 128
-IMAGE_PIXEL_MUAS = 2.0 * IMAGE_FOV_MUAS / IMAGE_N_PIXELS  # 3.1250 muas
+IMAGE_PIXEL_MUAS = 2.0 * IMAGE_FOV_MUAS / IMAGE_N_PIXELS  # 0.78125 muas
 
 # Smallest ring radius, in pixels, at which the Gaussian annulus is sampled
 # well enough that its peak survives for EVERY ring_width_frac the prior allows.
@@ -126,8 +127,11 @@ class GREternalWhiteHole(BaseModel):
         Lower bound: ``RING_RADIUS_MIN_PIXELS`` pixels, the point at which the
         annulus peak survives for every ``ring_width_frac`` in the prior.
         Upper bound: the field half-width, beyond which the ring leaves the
-        image entirely.  At the shipped 200 μas / 128 px geometry this is
-        ``[25.77, 200.0]`` μas -- a window of only 0.89 dex.
+        image entirely.  At the shipped 50 μas / 128 px geometry this is
+        ``[6.44, 50.0]`` μas, which covers both targets' full mass priors
+        (9.07-30.24 μas for M87*, 21.74-31.06 μas for Sgr A*).  The field used
+        to be 200 μas, whose 3.125 μas pixels put the floor at 25.77 μas --
+        above M87*'s ring entirely.
         """
         pixel_muas = 2.0 * float(fov_muas) / int(n_pixels)
         return (RING_RADIUS_MIN_PIXELS * pixel_muas, float(fov_muas))
@@ -315,29 +319,38 @@ class GREternalWhiteHole(BaseModel):
 
     # ── Geometry ──────────────────────────────────────────────────────────────
 
-    def photon_ring_radius_m(self, M_msun: float, a_star: float) -> float:
+    def photon_ring_radius_m(
+        self,
+        M_msun: float,
+        a_star: float,
+        inclination_rad: float = 0.0,
+    ) -> float:
         """Critical photon orbit impact parameter b_c [m].
 
-        For Schwarzschild: b_c = 3√3 GM/c².
-        For Kerr (prograde/retrograde average): approximate formula.
+        The shared ``kerr_shadow_radius_rg`` fit to the exact Bardeen critical
+        curve (0.363% accurate), which is also what the image simulator builds
+        its annulus from.
+
+        This method used to return ``rg (3 + sqrt(9 - 8 a^2))`` for a* != 0,
+        which is wrong three ways: it is discontinuous at a* = 0 (6 rg against
+        the correct 5.196 rg), it makes the shadow *grow* with spin up to
+        a* ~ 0.4 when the true shadow shrinks monotonically, and its error runs
+        from -16.9% to +13.7%.  Meanwhile the simulator applied a different
+        approximation, so this model's reported shadow diameter and the ring it
+        actually imaged disagreed by up to 28% at a* = 0.998.
         """
         rg = G * M_msun * M_SUN / C**2  # gravitational radius [m]
-        if a_star == 0.0:
-            return 3.0 * np.sqrt(3.0) * rg
-        # Approximate: photon-ring radius interpolation (Bardeen 1973)
-        # r_ph(a*) ≈ 3rg * (1 - 0.0136 * a_star + ...)
-        # Use an improved fitting formula (Chan+ 2015):
-        b_plus = rg * (3.0 + np.sqrt(9.0 - 8.0 * a_star**2))  # approximate outer photon orbit
-        return float(b_plus)
+        return float(kerr_shadow_radius_rg(a_star, inclination_rad) * rg)
 
     def shadow_angular_diameter_muas(
         self,
         M_msun: float,
         a_star: float,
         D_L_mpc: float,
+        inclination_rad: float = 0.0,
     ) -> float:
         """Shadow angular diameter [μas]."""
-        b_c = self.photon_ring_radius_m(M_msun, a_star)
+        b_c = self.photon_ring_radius_m(M_msun, a_star, inclination_rad)
         D_L_m = D_L_mpc * MPC_M
         theta_rad = b_c / D_L_m  # half-angle
         return float(2.0 * theta_rad / MUAS_RAD)
@@ -361,7 +374,7 @@ class GREternalWhiteHole(BaseModel):
         D_L = self.resolved_target.distance_mpc
         i = params["i"]
 
-        theta_d = self.shadow_angular_diameter_muas(M, a, D_L)
+        theta_d = self.shadow_angular_diameter_muas(M, a, D_L, inclination_rad=i)
         ring_width = theta_d * params["ring_width_frac"] / 2.0
 
         return {

@@ -9,18 +9,17 @@ I-1 -- ``bh_accretion`` is implemented as a genuinely different emission
 hypothesis: one accretion rate sets both ring brightness and ring thickness,
 and a jet footpoint breaks the ring's azimuthal symmetry.
 
-Two KNOWN DEFICIENCY tests are included deliberately.  They record measured
-shortfalls rather than asserting the state we want:
+Both of the KNOWN DEFICIENCY tests this file originally carried have since
+been resolved and the assertions inverted:
 
-* ``TestMassPriorRepresentability`` -- fixing the distance removed the prior's
-  contribution to the ring-radius spread entirely, but the shipped imaging grid
-  still cannot represent most of either target's mass prior.  That residual is
-  the grid's, not the prior's.
-* ``TestEveryAccretionParameterIsActive`` -- ``position_angle`` changes the
-  image by ~100% and the visibilities by 4e-4, because
-  ``_compute_visibilities`` converts baselines from Gλ to rad^-1 by multiplying
-  by the wavelength in metres, which puts every EHT baseline inside one FFT
-  cell of the uv origin.  Reported, not fixed here.
+* ``TestMassPriorRepresentability`` recorded 13.29% / 52.39% of each target's
+  mass prior being representable on a 200 μas field.  Sizing the field to the
+  source (50 μas / 128 px) makes both 100%.
+* ``TestEveryAccretionParameterIsActive`` recorded ``position_angle`` moving
+  the image by ~100% and the visibilities by 4e-4, because the baseline unit
+  conversion put every EHT baseline on the uv origin.  With that fixed the
+  visibility response is 0.392 and every declared parameter is active.
+  The uv sampler itself is tested in tests/test_image_uv_sampling.py.
 """
 
 from __future__ import annotations
@@ -34,15 +33,16 @@ from whitesearch.dataio import EHTLoader
 from whitesearch.inference import BilbyRunner
 from whitesearch.likelihoods import VisibilityLikelihood
 from whitesearch.models import get_model, model_for_context
-from whitesearch.models.gr_eternal import IMAGE_FOV_MUAS, GREternalWhiteHole
+from whitesearch.models.gr_eternal import (
+    IMAGE_FOV_MUAS,
+    IMAGE_N_PIXELS,
+    GREternalWhiteHole,
+)
 from whitesearch.simulators.image_shadow import (
     ImageShadowSimulator,
-    _default_eht_uv,
-    _gaussian_ring_image,
     _shadow_radius_muas,
     ring_emission_from_params,
 )
-from whitesearch.utils.constants import MUAS_RAD
 from whitesearch.utils.targets import (
     EHT_TARGETS,
     require_target,
@@ -225,47 +225,56 @@ class TestMassPriorRepresentability:
             assert tgt.mass_prior_low_msun < tgt.mass_msun < tgt.mass_prior_high_msun
 
     def test_representable_fraction_at_the_shipped_grid(self):
-        """KNOWN DEFICIENCY: still far from 100%, and the prior is not to blame.
+        """RESOLVED: 100% for both targets, on the grid the project ships.
 
-        At 200 μas / 128 px the floor is 25.77 μas.  M87*'s ring is 19.7 μas at
-        its measured mass and 30.5 μas at the top of its prior, so most of the
-        prior is below the floor; Sgr A*'s ring straddles it.  The blocker is
-        the imaging grid, which is an analysis setting, not the prior -- so it
-        is NOT narrowed here to make this number look better.
-
-        Not a target to preserve: if the grid is re-scaled (see I-3 in
-        docs/CHANNEL_STATUS_OVERVIEW.md) this test SHOULD fail and be updated.
+        This assertion used to read 13.29% (M87*) and 52.39% (Sgr A*) at a
+        200 μas field.  The prior was never the problem -- it is unchanged, and
+        is still set from the published mass measurements rather than from what
+        any grid can draw.  The field was ~10x the size of the sources.
         """
-        m87 = GREternalWhiteHole.mass_prior_representable_fraction("M87*")
-        sgra = GREternalWhiteHole.mass_prior_representable_fraction("SgrA*")
-        assert m87 == pytest.approx(0.1329, abs=0.002)
-        assert sgra == pytest.approx(0.5239, abs=0.002)
+        for name in EHT_TARGETS:
+            assert GREternalWhiteHole.mass_prior_representable_fraction(
+                name
+            ) == pytest.approx(1.0), name
 
-    def test_the_grid_the_prior_would_need(self):
-        """The residual stated as the setting that would remove it."""
-        assert GREternalWhiteHole.required_n_pixels_for_prior("M87*") == 364
-        assert GREternalWhiteHole.required_n_pixels_for_prior("SgrA*") == 152
+    def test_the_old_field_is_what_failed_not_the_prior(self):
+        """The same prior, scored on the field this project used to ship."""
+        m87 = GREternalWhiteHole.mass_prior_representable_fraction(
+            "M87*", fov_muas=200.0
+        )
+        sgra = GREternalWhiteHole.mass_prior_representable_fraction(
+            "SgrA*", fov_muas=200.0
+        )
+        assert m87 < 0.1 and sgra < 0.4
+        # And cli.py's old second copy of the grid was worse still: at 64 px
+        # over a 200 μas field the floor is 51.53 μas and nothing is
+        # representable at either target.
+        for name in EHT_TARGETS:
+            assert GREternalWhiteHole.mass_prior_representable_fraction(
+                name, fov_muas=200.0, n_pixels=64
+            ) == 0.0, name
+
+    def test_the_grid_requirement_is_derived_not_asserted(self):
+        """The floor scales as 1 / n_pixels, so the requirement inverts."""
+        assert GREternalWhiteHole.required_n_pixels_for_prior("M87*") == 97
+        assert GREternalWhiteHole.required_n_pixels_for_prior("SgrA*") == 41
+        assert IMAGE_N_PIXELS > 97, "the shipped grid clears the harder target"
         for name in EHT_TARGETS:
             n_req = GREternalWhiteHole.required_n_pixels_for_prior(name)
             assert GREternalWhiteHole.mass_prior_representable_fraction(
                 name, n_pixels=n_req
             ) == pytest.approx(1.0)
+            # One pixel coarser and the faintest mass in the prior drops out.
+            assert GREternalWhiteHole.mass_prior_representable_fraction(
+                name, n_pixels=n_req - 1
+            ) < 1.0
 
-    def test_a_smaller_field_would_do_it_at_the_shipped_pixel_count(self):
-        """The field is ~10x the source, which is the cheaper lever.
-
-        ``required_fov_muas_for_prior`` returns (min, max): the largest ring in
-        the prior must fit inside the field, and the smallest must stay above
-        the floor.  Both targets have a usable window at 128 px.
-        """
+    def test_the_shipped_field_is_inside_the_usable_window(self):
+        """``required_fov_muas_for_prior`` brackets the shipped choice."""
         for name in EHT_TARGETS:
             fov_min, fov_max = GREternalWhiteHole.required_fov_muas_for_prior(name)
-            assert fov_min < fov_max, name
-            assert fov_min < 50.0 < fov_max, name
-            assert GREternalWhiteHole.mass_prior_representable_fraction(
-                name, fov_muas=50.0
-            ) == pytest.approx(1.0)
-        assert IMAGE_FOV_MUAS == 200.0, "shipped field is still 4x the working one"
+            assert fov_min < IMAGE_FOV_MUAS < fov_max, name
+        assert IMAGE_FOV_MUAS == 50.0
 
     def test_the_window_inverts_the_forward_model_not_a_copy_of_it(self):
         lo_r, hi_r = GREternalWhiteHole.ring_radius_representable_range_muas()
@@ -404,10 +413,9 @@ class TestEveryAccretionParameterIsActive:
         rel = np.abs(moved - base).max() / base.max()
         assert rel > 1e-3, f"{name} leaves the image unchanged"
 
-    @pytest.mark.parametrize(
-        "name", ["M", "a_star", "i", "log10_mdot_edd", "jet_power_frac"]
-    )
+    @pytest.mark.parametrize("name", sorted(PERTURBED))
     def test_the_visibilities_and_the_likelihood_respond(self, name, baseline):
+        """All six, position_angle included since the uv sampler was fixed."""
         data, like, ll0 = baseline
         theta = {**ACCRETION_TRUTH, name: self.PERTURBED[name]}
         base_vis = np.abs(_sim(ACCRETION_TRUTH).data)
@@ -416,74 +424,46 @@ class TestEveryAccretionParameterIsActive:
         assert rel > 1e-3, f"{name} does not move the visibilities"
         assert abs(like.loglike(theta, data, CTX) - ll0) > 1.0
 
-    def test_position_angle_moves_the_image_but_not_the_visibilities(self, baseline):
-        """KNOWN DEFICIENCY -- blocked on the uv-conversion bug, not on I-1.
+    def test_position_angle_is_no_longer_inert(self, baseline):
+        """RESOLVED.  This test used to assert the opposite and explain why.
 
-        ``_compute_visibilities`` converts baselines from Gλ to rad^-1 as
-        ``uv * 1e9 * wavelength_m``.  A baseline in Gλ is already in cycles per
-        radian, so that multiplication is the conversion to metres of physical
-        baseline length and shrinks every EHT baseline by a factor 1.30e-3.
-        All 16 then land within 0.4% of one FFT cell of the uv origin, where
-        the visibility is just the total flux -- which rotation cannot change.
+        ``_compute_visibilities`` converted baselines from Gλ to rad^-1 as
+        ``uv * 1e9 * wavelength_m``, which is the conversion to physical
+        baseline length in metres; a baseline in Gλ is already an angular
+        frequency.  Every EHT baseline landed within 0.4% of one FFT cell of
+        the uv origin, where the visibility is just the total flux -- and
+        rotating an image cannot change its total flux.
 
-        Under correct sampling the same rotation moves |V| by 36% and thousands
-        of sigma; the test below records both numbers so the deficiency cannot
-        be mistaken for the model's.  Reported in
-        docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md and as I-4 in
-        docs/CHANNEL_STATUS_OVERVIEW.md; NOT fixed here.
+        Measured before and after, same truth, same perturbation
+        (position_angle 0.7 -> 1.9 rad):
+
+            max|dV| / max|V|        9.6e-4  ->  0.570   (594x)
+            max|d phase|            8.7e-4  ->  2.80 rad  (3200x)
+
+        See docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.13.1.
         """
         data, like, ll0 = baseline
         theta = {**ACCRETION_TRUTH, "position_angle": self.PERTURBED["position_angle"]}
 
-        base_img = _sim(ACCRETION_TRUTH).metadata["image"]
-        moved_img = _sim(theta).metadata["image"]
-        assert np.abs(moved_img - base_img).max() / base_img.max() > 0.5
+        base_vis = _sim(ACCRETION_TRUTH).metadata["vis_signal"]
+        moved_vis = _sim(theta).metadata["vis_signal"]
+        rel = np.abs(moved_vis - base_vis).max() / np.abs(base_vis).max()
+        assert rel > 0.3, "rotation must move the visibilities, not just the image"
 
-        base_vis = _sim(ACCRETION_TRUTH).data
-        moved_vis = _sim(theta).data
-        shipped = np.abs(moved_vis - base_vis).max() / np.abs(base_vis).max()
-        assert shipped < 1e-2, "if this now fails, the uv conversion was fixed"
+        d_phase = np.abs(np.angle(moved_vis / base_vis)).max()
+        assert d_phase > 1.0, "and it must move the phases by order a radian"
 
-        # Every model visibility is the zero-spacing flux, on every baseline.
-        # Compared against the noise-free signal, since that is the statement
-        # about the forward model rather than about the noise draw.
-        flux = base_img.sum() * (2.0 * CTX["fov_muas"] / CTX["n_pixels"]) ** 2
-        signal = np.abs(_sim(ACCRETION_TRUTH).metadata["vis_signal"])
-        assert np.abs(signal / flux - 1.0).max() < 2e-3, (
-            "0.13% is all the ring structure the shipped conversion leaves; "
-            "correct sampling spreads |V| over 39.7-163.7 Jy on this image"
-        )
+        assert abs(like.loglike(theta, data, CTX) - ll0) > 10.0
 
-        # The same rotation, sampled at the correct spatial frequencies.
-        correct = _direct_visibility_response(ACCRETION_TRUTH, theta)
-        assert correct > 0.3
-        assert correct > 100.0 * shipped
-
-
-def _direct_visibility_response(theta_a: dict, theta_b: dict) -> float:
-    """max|ΔV| / max|V| under a direct DFT at u [cycles/rad] = uv[Gλ] * 1e9."""
-    fov, n_pix = CTX["fov_muas"], CTX["n_pixels"]
-    dx = 2.0 * fov / n_pix
-    coords = np.linspace(-fov, fov, n_pix) * MUAS_RAD
-    xx, yy = np.meshgrid(coords, coords)
-    uv = _default_eht_uv() * 1e9
-
-    def dft(theta):
-        em = ring_emission_from_params(theta)
-        r = _shadow_radius_muas(theta["M"], theta["a_star"], 16.8)
-        img = _gaussian_ring_image(
-            fov, n_pix, r, r * em.ring_width_frac, em.brightness,
-            float(np.abs(np.cos(theta["i"]))), theta["position_angle"],
-            asym_amp=em.asym_amp,
-        )
-        return np.array([
-            (img * np.exp(-2j * np.pi * (u * xx + v * yy))).sum() * dx**2
-            for u, v in uv
-        ])
-
-    a, b = dft(theta_a), dft(theta_b)
-    return float(np.abs(b - a).max() / np.abs(a).max())
-
+    def test_the_visibilities_are_not_all_the_total_flux(self, baseline):
+        """The signature of the old bug: |V| identical on every baseline."""
+        data, _like, _ll0 = baseline
+        signal = np.abs(data.metadata["vis_signal"])
+        flux = data.metadata["image"].sum() * (
+            2.0 * CTX["fov_muas"] / CTX["n_pixels"]
+        ) ** 2
+        assert signal.max() / signal.min() > 2.0
+        assert signal.min() < 0.9 * flux
 
 class TestAccretionIsNotGREternalRelabelled:
     """I-1's closing check, with the magnitude reported."""
@@ -516,7 +496,7 @@ class TestAccretionIsNotGREternalRelabelled:
             MATCHED_RING_TRUTH, data, CTX
         )
         assert ll_accretion > ll_ring
-        assert ll_accretion - ll_ring > 1e5
+        assert ll_accretion - ll_ring > 100.0
 
     def test_the_two_models_do_not_share_a_parameter_vector(self):
         ring = VisibilityLikelihood("gr_eternal").parameter_names

@@ -595,14 +595,20 @@ def _default_context(channel: str) -> dict:
             "t_start_s": 0.1, "t_end_s": 0.3, "tsys_jy": 1000.0, "t_samp_ms": 0.1, "rng_seed": 42,
         },
         "xray": {"area_cm2": 1000.0, "bg_rate_cps": 0.5, "duration_s": 100.0, "dt_s": 1.0, "rng_seed": 42},
+    }
+    if channel == "image":
+        # The imaging grid comes from configs/instruments/eht.yaml, not from a
+        # second copy here.  cli.py used to hardcode n_pixels: 64 against the
+        # YAML's 128, and at 64 px neither EHT target's ring is representable
+        # at all.  See dataio.eht.eht_imaging_config().
+        from whitesearch.dataio.eht import eht_imaging_config
+
         # 'target' is declared explicitly rather than defaulted inside the
         # image code: it fixes the source distance, which this channel holds
         # constant instead of sampling.  M87* is this project's primary EHT
         # target; analysing Sgr A* means setting it to 'SgrA*' here or in the
         # run config, not relying on a fallback -- there is none.
-        "image": {"target": "M87*", "fov_muas": 200.0, "n_pixels": 64,
-                  "freq_ghz": 230.0, "thermal_noise_jy": 0.05, "rng_seed": 42},
-    }
+        return {"target": "M87*", "rng_seed": 42, **eht_imaging_config()}
     return contexts.get(channel, {})
 
 

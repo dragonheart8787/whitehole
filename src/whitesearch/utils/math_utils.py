@@ -189,6 +189,64 @@ def kerr_qnm_frequency(mass_msun: float, spin: float) -> tuple[float, float]:
     return f_qnm, q_qnm
 
 
+
+#: Coefficients of the Kerr shadow-size fit in ``kerr_shadow_radius_rg``.
+#: Least-squares fit of the EXACT critical-curve areal radius, computed from
+#: the Bardeen (1973) spherical-photon-orbit parametrisation
+#:
+#:     xi(r)  = [ (r^2 - a^2) - r (r^2 - 2r + a^2) ] / [ a (r - 1) ]
+#:     eta(r) = r^3 [ 4 a^2 - r (r - 3)^2 ] / [ a^2 (r - 1)^2 ]
+#:     alpha  = -xi / sin i ,  beta^2 = eta + a^2 cos^2 i - xi^2 cot^2 i
+#:
+#: over a grid of 35 spins in [0, 0.998] x 8 inclinations in [0, 90] deg.
+#: The constant term is pinned so Schwarzschild is exact (3 sqrt 3).
+#: Maximum error over that grid: 0.363%.
+#:
+#: Cross-checked against a published value rather than against this project's
+#: own numbers: the exact calculation gives 4.830 rg for the face-on
+#: near-extremal (a* = 0.998) shadow, matching the ~4.83 rg quoted for a* = 1
+#: in the Kerr shadow literature, and 5.196 rg = 3 sqrt 3 at a* = 0.
+KERR_SHADOW_FIT = (-0.061428, 0.01261416, -0.02348804, 0.03323501, -0.00903796)
+
+
+def kerr_shadow_radius_rg(spin: float, inclination_rad: float = 0.0) -> float:
+    """Areal radius of the Kerr shadow, in gravitational radii ``rg = GM/c^2``.
+
+    ``sqrt(Area / pi)`` of the critical curve seen by a distant observer at
+    polar angle ``inclination_rad``.  This is the single definition of "how big
+    is the ring" used by this project: the image simulator builds its annulus at
+    this radius and ``GREternalWhiteHole`` reports the same number, so the
+    forward model and the summary statistics cannot disagree.
+
+    Two earlier expressions this replaces, both wrong:
+
+    * ``3 sqrt(3) rg (1 - 0.0136 a + 0.0038 a^2)`` -- right shape, but the spin
+      dependence is far too weak (+6.5% at a* = 0.998).
+    * ``rg (3 + sqrt(9 - 8 a^2))`` -- discontinuous at a* = 0 (6 rg against
+      5.196 rg), and non-monotonic in the wrong direction: it makes the shadow
+      *grow* with spin up to a* ~ 0.4.  Error -16.9% to +13.7%.
+
+    The true shadow shrinks monotonically with spin, by 7.0% face-on and 5.0%
+    edge-on between a* = 0 and a* = 0.998 -- the weak spin dependence that makes
+    the shadow a mass measurement.
+
+    Parameters
+    ----------
+    spin : dimensionless |a*| in [0, 0.998]
+    inclination_rad : observer polar angle; 0 = face-on.
+    """
+    a2 = float(np.clip(np.abs(spin), 0.0, 0.998)) ** 2
+    s2 = float(np.sin(inclination_rad)) ** 2
+    c_a2, c_a4, c_a6, c_a2s, c_a4s = KERR_SHADOW_FIT
+    correction = (
+        1.0
+        + c_a2 * a2
+        + c_a4 * a2**2
+        + c_a6 * a2**3
+        + (c_a2s * a2 + c_a4s * a2**2) * s2
+    )
+    return float(3.0 * np.sqrt(3.0) * correction)
+
 # ── Dispersion and scattering ────────────────────────────────────────────────────
 
 def dm_delay_ms(
