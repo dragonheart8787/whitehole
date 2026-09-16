@@ -3,8 +3,11 @@
 Locks in the work on docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.4 (null could not be
 fit on this channel), X.8.1 (the data's own uv_coverage was never forwarded to
 the simulator) and X.8.2 (the closure-phase term vanished silently when the key
-was absent), and records the state of X.6 (ring-radius representability), which
-is deliberately NOT fixed here.
+was absent), and records the state of X.6 (ring-radius representability).
+
+X.6's prior-side cause is addressed in tests/test_image_target_and_accretion.py
+(the source distance is now a per-target constant); what remains here is the
+grid-side residual, which those tests quantify per target.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from whitesearch.simulators.image_shadow import (
     _shadow_radius_muas,
 )
 
-CTX = {"thermal_noise_jy": 0.05, "freq_ghz": 230.0,
+CTX = {"target": "M87*", "thermal_noise_jy": 0.05, "freq_ghz": 230.0,
        "fov_muas": IMAGE_FOV_MUAS, "n_pixels": IMAGE_N_PIXELS, "rng_seed": 7}
 
 
@@ -38,14 +41,17 @@ CTX = {"thermal_noise_jy": 0.05, "freq_ghz": 230.0,
 def observation():
     """A draw whose ring the grid can actually represent.
 
-    M and D_L are pinned rather than sampled: 80.98% of this model's prior puts
-    the ring below one pixel, where the image is exactly zero and every test
-    below would pass or fail for the wrong reason (audit X.6).
+    M is pinned rather than sampled.  The distance is no longer free -- it
+    comes from the target -- but at M87*'s 16.8 Mpc the shipped 200 μas / 128 px
+    grid can only represent M >= 8.44e9 M_sun, so a prior draw would still land
+    below the floor 86.7% of the time and every test below would pass or fail
+    for the wrong reason.  That residual is measured in
+    tests/test_image_target_and_accretion.py.
     """
-    model = get_model("gr_eternal")
+    model = get_model("gr_eternal", target="M87*")
     theta = model.sample_prior(np.random.default_rng(3))
-    theta = {**theta, "M": 6.5e9, "D_L": 5.0, "ring_width_frac": 0.2}
-    assert _shadow_radius_muas(theta["M"], theta["a_star"], theta["D_L"]) > 50.0
+    theta = {**theta, "M": 9.5e9, "ring_width_frac": 0.2}
+    assert _shadow_radius_muas(theta["M"], theta["a_star"], 16.8) > 25.8
     data = get_simulator("image").simulate(
         theta, CTX, rng=np.random.default_rng(11)
     )
@@ -141,26 +147,29 @@ class TestSampledDimension:
         )
         assert eff == []
 
-    def test_gr_eternal_dimension_is_unchanged(self):
+    def test_gr_eternal_no_longer_samples_the_distance(self):
+        """D_L left the sampled vector when it became a per-target constant."""
         eff = BilbyRunner.effective_parameter_names(
-            get_model("gr_eternal"), VisibilityLikelihood("gr_eternal")
+            get_model("gr_eternal", target="M87*"),
+            VisibilityLikelihood("gr_eternal"),
         )
-        assert eff == ["M", "a_star", "D_L", "i", "position_angle",
+        assert eff == ["M", "a_star", "i", "position_angle",
                        "ring_width_frac", "log10_brightness"]
+        assert "D_L" not in eff
 
-    def test_bh_accretion_still_cannot_build_priors(self):
-        """NOT fixed here, and recorded as such.
+    def test_bh_accretion_now_builds_priors(self):
+        """X.11.4: bh_accretion has a forward model, so it has a sampled vector.
 
-        BHAccretion declares log10_mdot_edd / jet_power_frac and none of
-        position_angle / ring_width_frac / log10_brightness, so wiring it up
-        means deciding how an accretion model maps onto a geometric ring - a
-        modelling decision, not a mechanical one.  See
-        docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.11.4.
+        It is deliberately NOT the ring vector: the accretion hypothesis
+        replaces the two free emission parameters with an accretion rate and a
+        jet-footpoint contrast.
         """
-        with pytest.raises(ValueError, match="does not declare"):
-            BilbyRunner.effective_parameter_names(
-                get_model("bh_accretion"), VisibilityLikelihood("bh_accretion")
-            )
+        eff = BilbyRunner.effective_parameter_names(
+            get_model("bh_accretion", target="M87*"),
+            VisibilityLikelihood("bh_accretion"),
+        )
+        assert eff == ["M", "a_star", "i", "position_angle",
+                       "log10_mdot_edd", "jet_power_frac"]
 
 
 class TestRingRepresentability:
@@ -191,8 +200,10 @@ class TestRingRepresentability:
         The two sources this channel exists to describe sit either side of it:
         M87* at 19.67 muas is BELOW the 25.77 muas floor, Sgr A* at 25.80 muas
         is barely above.  So the shipped grid cannot faithfully represent a thin
-        ring at M87*'s scale.  Recorded, not fixed -- see
-        docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.11.1.
+        ring at M87*'s scale.  Fixing the distance per target did not change
+        this -- it is a property of the grid, not of the prior -- and it is
+        still recorded rather than fixed; see docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md
+        X.11.1 and the I-3 entry in docs/CHANNEL_STATUS_OVERVIEW.md.
         """
         lo, hi = GREternalWhiteHole.ring_radius_representable_range_muas()
         r_m87 = _shadow_radius_muas(6.5e9, 0.9, 16.8)
@@ -202,19 +213,23 @@ class TestRingRepresentability:
         assert r_m87 < lo, "M87* sits below the representability floor"
         assert lo < r_sgra < hi
 
-    def test_prior_representability_is_still_poor(self):
-        """KNOWN DEFICIENCY, recorded rather than silently tolerated.
+    def test_fixing_the_distance_collapsed_the_prior_ring_spread(self):
+        """The prior-side half of X.6, measured before and after.
 
-        Not a target to preserve: if a reparameterisation onto the M/D_L ratio
-        lands, this test SHOULD fail and be updated deliberately.
+        With D_L sampled log-uniform over [1, 2000] Mpc the ring radius spanned
+        dex(M) + dex(D_L) = 7.301 dex; with the distance fixed by the target it
+        spans only the mass prior's own width.  The remaining shortfall is the
+        grid's, and is measured per target in
+        tests/test_image_target_and_accretion.py.
         """
-        model = get_model("gr_eternal")
+        model = get_model("gr_eternal", target="M87*")
         r = np.array([
             _shadow_radius_muas(
-                (th := model.sample_prior(np.random.default_rng(80000 + k)))["M"],
-                th["a_star"], th["D_L"])
-            for k in range(4000)
+                model.sample_prior(np.random.default_rng(80000 + k))["M"],
+                0.5, 16.8)
+            for k in range(2000)
         ])
-        inside = ((r >= IMAGE_PIXEL_MUAS) & (r <= IMAGE_FOV_MUAS)).mean()
-        assert 0.15 < inside < 0.25
-        assert (r < IMAGE_PIXEL_MUAS).mean() > 0.75
+        spread_dex = np.log10(r.max() / r.min())
+        assert spread_dex < 0.55, "mass prior alone is 0.523 dex wide"
+        # No draw produces the exactly-zero image that 80.98% of the old prior did.
+        assert (r < IMAGE_PIXEL_MUAS).mean() == 0.0

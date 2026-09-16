@@ -153,7 +153,7 @@ def _load_mock(
     seed: int,
     reference_amplitude: bool,
 ) -> Any:
-    from ..models import check_model_channel, get_model
+    from ..models import check_model_channel, model_for_context
     from ..simulators import get_simulator
 
     import numpy as np
@@ -164,7 +164,10 @@ def _load_mock(
     # channel produced a plausible-looking burst built entirely out of those
     # defaults.  See docs/RADIO_PREFLIGHT_AUDIT.md R.12.2.
     check_model_channel(inject_model, channel)
-    model = get_model(inject_model)
+    # model_for_context, not get_model: on the image channel the model
+    # needs the analysis target to state its mass prior and its distance,
+    # and takes it from the same context the simulator reads.
+    model = model_for_context(inject_model, context)
     sim = get_simulator(channel)
     params = model.sample_prior(np.random.default_rng(seed))
     ctx = dict(context)

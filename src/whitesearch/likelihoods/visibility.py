@@ -14,7 +14,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .base import BaseLikelihood, gaussian_loglike, von_mises_loglike
-from ..simulators.image_shadow import ImageShadowSimulator
+from ..simulators.image_shadow import (
+    ImageShadowSimulator,
+    _shadow_radius_muas,
+    ring_emission_from_params,
+)
+from ..utils.targets import require_target
 
 
 class VisibilityLikelihood(BaseLikelihood):
@@ -28,11 +33,32 @@ class VisibilityLikelihood(BaseLikelihood):
     where κ is estimated from S/N.
     """
 
-    #: Parameters the ring model in ImageShadowSimulator actually reads.
+    #: Parameters the geometric ring hypothesis (gr_eternal) actually reads
+    #: in ImageShadowSimulator.  ``D_L`` is absent by design: the source
+    #: distance is a per-target known constant taken from the observation or
+    #: the context, not a sampled parameter -- see utils.targets.
     RING_PARAMETERS = [
-        "M", "a_star", "D_L", "i", "position_angle",
+        "M", "a_star", "i", "position_angle",
         "ring_width_frac", "log10_brightness",
     ]
+
+    #: Parameters the accretion-flow hypothesis (bh_accretion) reads.  It
+    #: shares the geometry and replaces the two free emission parameters with
+    #: an accretion rate plus a jet-footpoint contrast.
+    ACCRETION_PARAMETERS = [
+        "M", "a_star", "i", "position_angle",
+        "log10_mdot_edd", "jet_power_frac",
+    ]
+
+    #: Which parameter vector each model on this channel is fit with.
+    #: Fail-closed: an unlisted model name raises rather than silently
+    #: inheriting the ring vector, which is how bh_accretion previously
+    #: advertised parameters its forward model never read.
+    MODEL_PARAMETERS: dict[str, list[str]] = {
+        "null": [],
+        "gr_eternal": RING_PARAMETERS,
+        "bh_accretion": ACCRETION_PARAMETERS,
+    }
 
     def __init__(
         self,
@@ -69,9 +95,13 @@ class VisibilityLikelihood(BaseLikelihood):
 
     @property
     def parameter_names(self) -> list[str]:
-        if self.model_name == "null":
-            return []
-        return list(self.RING_PARAMETERS)
+        try:
+            return list(self.MODEL_PARAMETERS[self.model_name])
+        except KeyError:
+            raise KeyError(
+                f"VisibilityLikelihood has no forward model for "
+                f"{self.model_name!r}. Known: {sorted(self.MODEL_PARAMETERS)}."
+            ) from None
 
     def loglike(
         self,
@@ -109,6 +139,11 @@ class VisibilityLikelihood(BaseLikelihood):
         # docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.8.1.
         model_context = dict(context)
         model_context["uv_coverage"] = self._require_uv_coverage(meta, context)
+        # Same metadata-first, context-second resolution the GW likelihood uses
+        # for per-event known quantities (t_merger, band edges), except that a
+        # missing target raises instead of falling back: the target fixes the
+        # source distance, and the two supported targets differ by 3.31 dex.
+        model_context["target"] = require_target(meta, context).name
         sim = ImageShadowSimulator()
         sim_data = sim.simulate(theta, model_context, rng=np.random.default_rng(0))
         model_vis = np.asarray(sim_data.data, dtype=complex)
@@ -210,22 +245,27 @@ class VisibilityLikelihood(BaseLikelihood):
         self,
         theta: dict[str, float],
         context: dict[str, Any],
-    ) -> dict[str, float]:
-        """Ring diameter, axial ratio, brightness for PPC."""
-        from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
+    ) -> dict[str, Any]:
+        """Ring diameter, axial ratio, thickness and brightness for PPC.
 
-        M = theta["M"]
-        a = theta.get("a_star", 0.0)
-        D_L = theta["D_L"]
-        i = theta.get("i", 0.0)
+        The return is ``dict[str, Any]`` rather than ``dict[str, float]``
+        because it also carries ``emission_model``, the provenance string
+        naming which hypothesis produced these numbers.
 
-        rg = G * M * M_SUN / C**2
-        b_c = 3.0 * np.sqrt(3.0) * rg
-        theta_d = 2.0 * b_c / (D_L * MPC_M) / MUAS_RAD
+        Derived with the same two functions the simulator uses
+        (``_shadow_radius_muas`` and ``ring_emission_from_params``) rather than
+        a local copy of either expression, and with the same per-target
+        distance, so a posterior-predictive check cannot be comparing against a
+        slightly different forward model than the one that was fit.
+        """
+        D_L = require_target(context).distance_mpc
+        emission = ring_emission_from_params(theta)
+        theta_d = 2.0 * _shadow_radius_muas(theta["M"], theta["a_star"], D_L)
 
         return {
             "theta_d_muas": theta_d,
-            "axial_ratio": float(np.abs(np.cos(i))),
-            "ring_width_muas": theta_d * theta.get("ring_width_frac", 0.1) / 2.0,
-            "brightness": float(10.0 ** theta.get("log10_brightness", 0.0)),
+            "axial_ratio": float(np.abs(np.cos(theta["i"]))),
+            "ring_width_muas": theta_d * emission.ring_width_frac / 2.0,
+            "brightness": emission.brightness,
+            "emission_model": emission.emission_model,
         }

@@ -105,13 +105,30 @@ def test_unknown_prior_type_raises_instead_of_silent_uniform():
 
 
 def test_every_model_builds_bilby_priors():
-    """to_bilby_priors() must not raise for any registered model."""
-    from whitesearch.models import MODEL_REGISTRY, get_model
+    """to_bilby_priors() must not raise for any registered model.
+
+    Image-channel models are built through ``model_for_context``: they hold the
+    source distance fixed per target and state a per-target mass prior, so they
+    have to be told which target they describe before they can state a prior at
+    all.  ``{"target": ...}`` is the whole context they need here.
+    """
+    from whitesearch.models import MODEL_REGISTRY, model_for_context
 
     for name in MODEL_REGISTRY:
-        model = get_model(name)
+        model = model_for_context(name, {"target": "M87*"})
         priors = model.to_bilby_priors()
         assert set(priors) == set(model.parameter_names), name
+
+
+def test_image_models_refuse_to_build_priors_without_a_target():
+    """fail-closed: guessing a target would put the distance off by 3.31 dex."""
+    from whitesearch.models import get_model, model_requires_target
+
+    targeted = [n for n in ("gr_eternal", "bh_accretion") if model_requires_target(n)]
+    assert targeted == ["gr_eternal", "bh_accretion"]
+    for name in targeted:
+        with pytest.raises(ValueError, match="which target it describes"):
+            get_model(name).to_bilby_priors()
 
 
 @pytest.mark.parametrize("values", [[4, 5], [2, 7, 11], [-3, 0, 1, 9]])

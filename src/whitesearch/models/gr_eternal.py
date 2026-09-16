@@ -11,10 +11,13 @@ ellipticity, brightness distribution) and possible quasi-thermal radio continuum
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .base import BaseModel, ParameterSpec
 from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
+from ..utils.targets import ImageTarget, get_target
 
 
 # EHT imaging grid this project analyses, from configs/instruments/eht.yaml ->
@@ -38,6 +41,23 @@ IMAGE_PIXEL_MUAS = 2.0 * IMAGE_FOV_MUAS / IMAGE_N_PIXELS  # 3.1250 muas
 # depends on whether r_ring happens to be commensurate with the pixel grid.
 RING_RADIUS_MIN_PIXELS = 8.245
 
+#: Spin at which the Kerr shadow is smallest, i.e. the most demanding case for
+#: the representability floor.  Matches the a_star prior's upper edge.
+SPIN_MAX = 0.998
+
+
+def _unit_mass_ring_radius_muas(a_star: float, distance_mpc: float) -> float:
+    """Ring radius [muas] of a 1 M_sun source, so radius = M * this.
+
+    ``_shadow_radius_muas`` is linear in mass, so one evaluation inverts it.
+    Deliberately calls the simulator's function rather than reproducing the
+    formula: this module derives what the *forward model* can represent, and a
+    second copy of the expression would be free to drift away from it.
+    """
+    from ..simulators.image_shadow import _shadow_radius_muas
+
+    return _shadow_radius_muas(1.0, a_star, distance_mpc)
+
 
 class GREternalWhiteHole(BaseModel):
     """Parametric GR eternal white hole with Schwarzschild/Kerr geometry.
@@ -50,13 +70,50 @@ class GREternalWhiteHole(BaseModel):
     include_charge : bool
         Include the electric charge Q as a free parameter (Kerr-Newman).
         Default False (pure Kerr).
+    target : str | ImageTarget | None
+        Which source is being analysed ('M87*' or 'SgrA*').  Supplies the
+        distance, which this channel treats as a known constant rather than a
+        sampled parameter, and the mass prior.  ``None`` is accepted at
+        construction so that channel-compatibility checks can instantiate the
+        class without committing to a target, but every method that needs the
+        distance raises until one is set -- see ``resolved_target``.
     """
 
     name = "GREternalWhiteHole"
     channel = "image"
 
-    def __init__(self, include_charge: bool = False) -> None:
+    #: The per-target distance/mass constants are mandatory for this model;
+    #: ``models.model_for_context`` reads this to know it must supply one.
+    requires_target = True
+
+    def __init__(
+        self,
+        include_charge: bool = False,
+        target: str | ImageTarget | None = None,
+    ) -> None:
         self.include_charge = include_charge
+        self.target = get_target(target) if target is not None else None
+
+    @property
+    def resolved_target(self) -> ImageTarget:
+        """The analysis target, or raise.
+
+        Fail-closed rather than defaulting to M87*: the two supported targets'
+        distances differ by 3.31 dex, so a guessed default would put the ring
+        radius off by the same factor.
+        """
+        if self.target is None:
+            raise ValueError(
+                f"{self.name} needs to know which target it describes before it "
+                "can state a mass prior or a shadow size: the source distance "
+                "is a known constant on this channel, not a sampled parameter. "
+                "Construct it as get_model('gr_eternal', target='M87*'), or use "
+                "models.model_for_context(name, context) to take the target "
+                "from the analysis context."
+            )
+        return self.target
+
+    # ── What the image grid can represent ─────────────────────────────────────
 
     @classmethod
     def ring_radius_representable_range_muas(
@@ -71,59 +128,128 @@ class GREternalWhiteHole(BaseModel):
         Upper bound: the field half-width, beyond which the ring leaves the
         image entirely.  At the shipped 200 μas / 128 px geometry this is
         ``[25.77, 200.0]`` μas -- a window of only 0.89 dex.
-
-        NOT CURRENTLY USED TO SET THE PRIOR, deliberately.  The image
-        constrains the ring radius, which depends on ``M`` and ``D_L`` only
-        through the ratio ``r ∝ M / D_L`` (numerically
-        ``r[μas] = 5.130245e-08 * M[M_sun] / D_L[Mpc]``).  With independent
-        log-uniform priors the radius therefore spans
-        ``dex(M) + dex(D_L)``: 4.000 + 3.301 = 7.301 dex against a window of
-        0.89-1.20 dex, so only 18.29% of prior draws land inside it and 80.98%
-        fall below one pixel and produce an exactly-zero image.
-
-        Forcing ~100% representability by narrowing both priors would require
-        ``dex(M) + dex(D_L) <= 1.204`` -- for instance a factor of 4 in mass AND
-        a factor of 4 in distance.  That is narrower than the sources this
-        channel exists to describe: M87* (6.5e9 M_sun at 16.8 Mpc) and Sgr A*
-        (4.15e6 M_sun at 0.008178 Mpc) differ by 3.19 dex in mass and 3.31 dex
-        in distance, yet both sit at r = 19.7 and 25.8 μas because the two
-        co-vary.  Narrowing the marginals cannot express that correlation.
-
-        The structural fix is a reparameterisation onto the ratio the data
-        constrains -- the analogue of the burst-delay reparameterisation in
-        BOUNCE_PREFLIGHT_AUDIT.md B3-2 -- which is a design decision, not a
-        mechanical narrowing.  Recorded in docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md
-        X.6 and X.11.1.
         """
         pixel_muas = 2.0 * float(fov_muas) / int(n_pixels)
         return (RING_RADIUS_MIN_PIXELS * pixel_muas, float(fov_muas))
 
+    @classmethod
+    def mass_representable_range_msun(
+        cls,
+        target: str | ImageTarget,
+        a_star: float = SPIN_MAX,
+        fov_muas: float = IMAGE_FOV_MUAS,
+        n_pixels: int = IMAGE_N_PIXELS,
+    ) -> tuple[float, float]:
+        """Masses whose ring the grid can represent, at this target's distance.
+
+        The image constrains the ring radius, which is
+        ``r[μas] = 5.130e-08 * M[M_sun] / D_L[Mpc]`` up to a <1% Kerr spin
+        correction.  With ``D_L`` fixed by the target this inverts directly, so
+        ``ring_radius_representable_range_muas`` becomes a statement about
+        ``M`` alone -- which is what makes a per-target mass prior checkable.
+        """
+        tgt = get_target(target)
+        lo_r, hi_r = cls.ring_radius_representable_range_muas(fov_muas, n_pixels)
+        unit = _unit_mass_ring_radius_muas(a_star, tgt.distance_mpc)
+        return (lo_r / unit, hi_r / unit)
+
+    @classmethod
+    def mass_prior_representable_fraction(
+        cls,
+        target: str | ImageTarget,
+        a_star: float = SPIN_MAX,
+        fov_muas: float = IMAGE_FOV_MUAS,
+        n_pixels: int = IMAGE_N_PIXELS,
+    ) -> float:
+        """Fraction of the target's log-uniform mass prior the grid represents.
+
+        Analytic rather than sampled: the prior is log-uniform and the window
+        is an interval in ``M``, so the fraction is the overlap in dex.
+        """
+        tgt = get_target(target)
+        m_lo, m_hi = cls.mass_representable_range_msun(
+            tgt, a_star=a_star, fov_muas=fov_muas, n_pixels=n_pixels
+        )
+        lo = max(math.log10(tgt.mass_prior_low_msun), math.log10(m_lo))
+        hi = min(math.log10(tgt.mass_prior_high_msun), math.log10(m_hi))
+        span = math.log10(tgt.mass_prior_high_msun) - math.log10(tgt.mass_prior_low_msun)
+        return max(0.0, hi - lo) / span
+
+    @classmethod
+    def required_n_pixels_for_prior(
+        cls,
+        target: str | ImageTarget,
+        a_star: float = SPIN_MAX,
+        fov_muas: float = IMAGE_FOV_MUAS,
+    ) -> int:
+        """Smallest ``n_pixels`` at which the whole mass prior is representable.
+
+        Only the prior's *lightest* mass binds: the floor scales as
+        ``1 / n_pixels`` while the ceiling (the field half-width) is untouched
+        by resolution.
+        """
+        tgt = get_target(target)
+        r_min = tgt.mass_prior_low_msun * _unit_mass_ring_radius_muas(
+            a_star, tgt.distance_mpc
+        )
+        return int(math.ceil(RING_RADIUS_MIN_PIXELS * 2.0 * float(fov_muas) / r_min))
+
+    @classmethod
+    def required_fov_muas_for_prior(
+        cls,
+        target: str | ImageTarget,
+        a_star: float = SPIN_MAX,
+        n_pixels: int = IMAGE_N_PIXELS,
+    ) -> tuple[float, float]:
+        """Field half-widths at which the whole mass prior is representable.
+
+        Returns ``(fov_min, fov_max)``.  ``fov_max`` is set by the floor -- the
+        pixel size, hence the floor, shrinks with the field, so a *smaller*
+        field represents a *smaller* ring.  ``fov_min`` is set by the ceiling:
+        the largest ring in the prior still has to fit inside the image.  An
+        empty interval means no field half-width works at this ``n_pixels``.
+        """
+        tgt = get_target(target)
+        unit = _unit_mass_ring_radius_muas(a_star, tgt.distance_mpc)
+        r_min = tgt.mass_prior_low_msun * unit
+        r_max = tgt.mass_prior_high_msun * unit
+        fov_max = r_min * int(n_pixels) / (2.0 * RING_RADIUS_MIN_PIXELS)
+        return (r_max, fov_max)
+
+    # ── Parameters ────────────────────────────────────────────────────────────
+
     def parameters(self) -> list[ParameterSpec]:
+        tgt = self.resolved_target
         params = [
             ParameterSpec(
                 name="M",
                 prior_type="log_uniform",
-                prior_kwargs={"low": 1e6, "high": 1e10},
+                prior_kwargs={
+                    "low": tgt.mass_prior_low_msun,
+                    "high": tgt.mass_prior_high_msun,
+                },
                 unit="M_sun",
-                description="BH/WH mass (supermassive; target: VLBI-resolvable sources)",
+                description=(
+                    f"BH/WH mass of {tgt.name}; prior brackets the independent "
+                    f"published measurements ({tgt.mass_source})"
+                ),
                 latex=r"$M$",
             ),
             ParameterSpec(
                 name="a_star",
                 prior_type="uniform",
-                prior_kwargs={"low": 0.0, "high": 0.998},
+                prior_kwargs={"low": 0.0, "high": SPIN_MAX},
                 unit="dimensionless",
                 description="Dimensionless spin |a*| = |J|c / (GM^2)",
                 latex=r"$a_*$",
             ),
-            ParameterSpec(
-                name="D_L",
-                prior_type="log_uniform",
-                prior_kwargs={"low": 1.0, "high": 2000.0},
-                unit="Mpc",
-                description="Luminosity distance",
-                latex=r"$D_L$",
-            ),
+            # D_L is NOT sampled.  The image constrains the ring radius, which
+            # depends on M and D_L only through M / D_L, so a free distance adds
+            # a direction the data cannot constrain: with the previous
+            # log_uniform(1, 2000) Mpc prior the ring radius spanned 7.30 dex
+            # against a representable window of 0.89 dex and 80.98% of draws
+            # produced an exactly-zero image (audit X.6).  The distance is now a
+            # per-target known constant from utils.targets.
             ParameterSpec(
                 name="i",
                 prior_type="cos_uniform",
@@ -232,7 +358,7 @@ class GREternalWhiteHole(BaseModel):
         """
         M = params["M"]
         a = params["a_star"]
-        D_L = params["D_L"]
+        D_L = self.resolved_target.distance_mpc
         i = params["i"]
 
         theta_d = self.shadow_angular_diameter_muas(M, a, D_L)

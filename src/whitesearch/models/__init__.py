@@ -1,3 +1,5 @@
+from typing import Any
+
 from .base import BaseModel, ParameterSpec  # noqa: F401
 from .gr_eternal import GREternalWhiteHole  # noqa: F401
 from .bounce import BlackToWhiteBounce  # noqa: F401
@@ -27,6 +29,30 @@ def get_model(name: str, **kwargs) -> BaseModel:
     if name not in MODEL_REGISTRY:
         raise KeyError(f"Unknown model {name!r}. Available: {list(MODEL_REGISTRY)}")
     return MODEL_REGISTRY[name](**kwargs)
+
+
+def model_requires_target(name: str) -> bool:
+    """Whether this model needs a per-target constant before it can be used."""
+    if name not in MODEL_REGISTRY:
+        raise KeyError(f"Unknown model {name!r}. Available: {list(MODEL_REGISTRY)}")
+    return bool(getattr(MODEL_REGISTRY[name], "requires_target", False))
+
+
+def model_for_context(name: str, context: dict[str, Any] | None = None, **kwargs):
+    """Instantiate a model, supplying any per-target constants it requires.
+
+    The image-channel models hold the source distance fixed rather than
+    sampling it, so they need to know which target the analysis is about.  This
+    is the one place that reads it off the analysis context, so every entry
+    point -- CLI fit, mock injection, calibration report -- resolves it the
+    same way, and fails closed in the same way when it is absent.  Models that
+    do not need a target ignore the context entirely.
+    """
+    if model_requires_target(name) and "target" not in kwargs:
+        from ..utils.targets import require_target
+
+        kwargs["target"] = require_target(context or {})
+    return get_model(name, **kwargs)
 
 
 #: Which model channels each data channel accepts.  'generic' is the null

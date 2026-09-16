@@ -459,3 +459,269 @@ image 版本。
 | 路徑 | 內容 | 是否進版控 |
 |---|---|---|
 | `tests/test_image_forward_model.py` | 16 項 image 通道對齊與 fail-closed 測試 | 是 |
+
+---
+
+# X.12 落地實作：`D_L` context 化（I-2）與 `bh_accretion` 物理實作（I-1）
+
+> 這一節是 X.6 / X.11.1（環半徑先驗）與 X.11.4（`bh_accretion`）兩項設計決定的
+> 落地實作紀錄。**不含任何科學結論**；只記錄實作內容、量測到的數字，
+> 以及實作過程中發現、但這一輪**沒有**修的問題。
+> 沒有跑任何 SBC/campaign/取樣。
+
+## X.12.1（I-2）`D_L` 成為逐目標已知常數
+
+### 機制：比照 GW 通道，不另創一套
+
+GW 通道對「逐事件已知量」的處理在 `GWLikelihood._parse_data`：
+
+```python
+t_merger = float(meta.get("t_merger", context.get("t_merger", 0.5)))
+low_freq = float(meta.get("low_freq_cutoff", context.get("low_freq_cutoff", 20.0)))
+```
+
+亦即 **observation metadata 優先、analysis context 次之**。image 通道沿用同一個
+順序，只有一處刻意不同：**沒有第三層預設值**。`utils/targets.py::require_target()`
+在兩層都沒有 `target` 時 raise，理由與 `VisibilityLikelihood._require_uv_coverage`
+（X.11.2）相同——猜一個目標等於猜一個距離，而兩個目標的距離差 3.313 dex。
+
+### `target` 欄位（而不是重用 `source`）
+
+`EHTLoader` 既有的 record 已經有一個 `source` 鍵，裡面放的是**目標名稱**
+（`"M87"` / `"SgrA"`），與 GW / radio 路徑上 `source` 代表**資料來源證跡**
+（`GWOSC` / `MOCK_EXPLICIT` / `MOCK_SIMULATOR`）的意義相衝突。
+這次**新增獨立的 `target` 鍵**，不動 `source` 的既有語意，並在 `eht.py`
+的 docstring 裡把這個碰撞寫清楚。`EHTLoader` 的三條路徑
+（`_load_ehtim` / `_load_cache` 以外的 `_mock_eht_data` / `_parse_uvfits_minimal`）
+都明確寫入 `target`；`load_from_file()` 現在**要求**呼叫端傳入 `target`
+（原本寫死 `source="custom"`），因為檔案本身不會說它是哪個源。
+
+### 距離與質量常數（含出處）
+
+`utils/targets.py::EHT_TARGETS`：
+
+| 目標 | `distance_mpc` | 出處 | 質量先驗 `[low, high]` M_sun | 出處 |
+|---|---|---|---|---|
+| `M87*` | 16.8 | EHT Collaboration 2019, ApJL 875, L6 | `[3.0e9, 1.0e10]` | EHT 2019 L6 給 (6.5 ± 0.2|stat ± 0.7|sys)e9；先驗放寬到涵蓋該文比較的兩個獨立動力學測量：恆星動力學 6.2e9（Gebhardt+2011, ApJ 729, 119）與氣體動力學 3.5e9（Walsh+2013, ApJ 770, 86），兩者差約 1.8 倍 |
+| `SgrA*` | 0.008178 | GRAVITY Collaboration 2019, A&A 625, L10（R0 = 8178 ± 13|stat ± 22|sys pc） | `[3.5e6, 5.0e6]` | GRAVITY 2019 給 (4.154 ± 0.014|stat ± 0.014|sys)e6；先驗放寬到涵蓋 Keck 獨立軌道擬合 3.975e6 ± 0.058e6（Do+2019, Science 365, 664） |
+
+專案原本就在程式與測試裡用 16.8 Mpc 與 0.008178 Mpc，這次把出處補進常數旁。
+**先驗寬度是照文獻上的獨立測量訂的，不是照網格可表示範圍反推的**——這一點
+很重要，見 X.12.2。
+
+### 取樣維度的變化
+
+| 模型 | 之前 | 之後 |
+|---|---|---|
+| `gr_eternal` | `M, a_star, D_L, i, position_angle, ring_width_frac, log10_brightness`（7） | `M, a_star, i, position_angle, ring_width_frac, log10_brightness`（6） |
+| `bh_accretion` | 無法建立先驗 | `M, a_star, i, position_angle, log10_mdot_edd, jet_power_frac`（6） |
+
+`VisibilityLikelihood.MODEL_PARAMETERS` 改成逐模型查表，未列名的模型名稱 raise
+（而不是安靜地繼承環的參數向量）。模型建構改由 `models.model_for_context(name, context)`
+統一供應 `target`；`get_model(name)` 不帶 target 仍可建構（`check_model_channel`
+需要），但任何需要距離的方法都會 raise。
+
+## X.12.2（I-2）重新推導 M 的可表示先驗——**先驗側問題解決，網格側沒有**
+
+### 先驗側：7.301 dex → 0.523 / 0.155 dex
+
+X.6 記錄的機制是：環半徑只透過比值 `r ∝ M / D_L` 進入影像，所以獨立的
+log-uniform 先驗讓環半徑跨 `dex(M) + dex(D_L) = 4.000 + 3.301 = 7.301 dex`，
+對上 0.89 dex 的可表示視窗，只有 18.29% 落在裡面、80.98% 產生精確為零的影像。
+
+固定 `D_L` 之後，環半徑的先驗展寬**只剩質量先驗本身**：
+
+| 目標 | 質量先驗寬度 | 環半徑範圍（a\* = 0.998） |
+|---|---|---|
+| `M87*` | 0.523 dex | 9.07 – 30.24 μas |
+| `SgrA*` | 0.155 dex | 21.74 – 31.06 μas |
+
+**先驗側的問題完全消失**：在一個能表示這個尺度的網格上，先驗抽樣不再產生任何
+一張精確為零的影像（`test_no_prior_draw_produces_an_empty_image_on_a_working_grid`
+逐張檢查 50 筆）。
+
+### 網格側：**shipped 網格仍然表示不了大部分的先驗**
+
+但在 **shipped 的 200 μas / 128 px 網格**上，可表示下界是
+`8.245 px × 3.125 μas/px = 25.77 μas`，而兩個目標的環都在這個下界附近或以下：
+
+| 目標 | 質量先驗可表示比例（a\* = 0.998） | 同上（a\* = 0） |
+|---|---|---|
+| `M87*` | **13.29%** | 14.11% |
+| `SgrA*` | **52.39%** | 55.14% |
+
+**如實回報：這個數字沒有接近 100%，而且原因不在先驗。**
+`M87*` 在測到的質量 6.5e9 下環半徑 19.66 μas，本來就低於 25.77 μas 的下界；
+要讓整段質量先驗都可表示，需要的是**網格設定**：
+
+| 槓桿 | `M87*` | `SgrA*` |
+|---|---|---|
+| 固定 FoV = 200 μas，需要的 `n_pixels` | **≥ 364** | **≥ 152** |
+| 固定 `n_pixels` = 128，可用的 FoV 半寬區間 | **[30.24, 70.42] μas** | **[31.06, 168.76] μas** |
+
+其中 FoV 是比較便宜的槓桿：shipped 的 200 μas **半寬**（400 μas 全寬）
+對一個 20–31 μas 的環大了約一個數量級。**兩個目標在 FoV = 50 μas / 128 px
+下都是 100% 可表示**，而且先驗中最大的環（31.06 μas）仍然安穩落在視野內。
+
+**這一輪沒有改 `configs/instruments/eht.yaml` 的 `imaging.fov_muas`，也沒有改
+`cli.py` 的預設 context。** 理由：這是分析設定的決定，不是接線修正；而且
+依既有規則，發現阻塞性問題要回報而不是順手改掉。推導已經進程式碼
+（`GREternalWhiteHole.mass_representable_range_msun` /
+`mass_prior_representable_fraction` / `required_n_pixels_for_prior` /
+`required_fov_muas_for_prior`），上面每一個數字都由測試鎖住。
+**列為新的待決策 I-3。**
+
+> 另記：`cli.py::_default_context("image")` 用的是 `n_pixels: 64`，
+> 與 `configs/instruments/eht.yaml` 的 `128` 不一致。在 64 px 下可表示下界是
+> 51.53 μas，**兩個目標的可表示比例都是 0%**。這個不一致是既有的，不是這次引入的。
+
+## X.12.3（I-1）`bh_accretion` 的物理實作
+
+選了 X.11.4 表格裡的 **C**（擴充 `ImageShadowSimulator`），作法比照 GW 通道
+`bh_ringdown` 的 `log10_A`：宣告一條唯象標度律，不做第一原理 GRMHD、不引入
+新的物理套件或輻射轉移。
+
+### 兩個參數各自驅動什麼
+
+```
+log10 I0        = LOG10_I0_EDD        + BRIGHTNESS_MDOT_INDEX * log10_mdot_edd
+log10 (w / r)   = LOG10_W_FRAC_EDD    + W_FRAC_MDOT_INDEX     * log10_mdot_edd
+asym_amp        = JET_CONTRAST_MAX    * jet_power_frac
+```
+
+| 常數 | 值 | 理由 |
+|---|---|---|
+| `LOG10_I0_EDD` | 2.0 | Eddington 率下峰值面亮度 10² Jy/μas²；在先驗 `[-5, 0]` 上跨 10⁻³–10² Jy/μas²，乘上 ~250 μas² 的環面積後涵蓋 M87\* 230 GHz 實際的 ~0.5–1 Jy 緊緻流量 |
+| `BRIGHTNESS_MDOT_INDEX` | 1.0 | 亮度隨吸積率上升，取 log-log 線性、指數 1 |
+| `LOG10_W_FRAC_EDD` | log10(0.05) | 接近 Eddington 的薄盤 H/R ~ 0.05 |
+| `W_FRAC_MDOT_INDEX` | −0.18 | 厚度**隨吸積率下降**：M87\* 與 Sgr A\* 是輻射低效吸積流，低吸積率下幾何厚（H/R ~ 0.4），−0.18 把先驗兩端接到 0.397 與 0.05 |
+| `JET_CONTRAST_MAX` | 3.0 | `jet_power_frac` = 1 時足點亮度 4 倍 |
+| `JET_FOOTPOINT_SIGMA_RAD` | 0.6 | 足點方位角半寬 ~34° |
+
+**`log10_mdot_edd` 同時決定亮度與厚度，這正是與 `gr_eternal` 的實質差異**：
+`gr_eternal` 把這兩者當成兩個獨立自由參數，所以它可以造出「亮而薄」或「暗而厚」
+的環，`bh_accretion` 不行。厚度再 clip 到 `[0.01, 0.5]`，與 `gr_eternal`
+`ring_width_frac` 先驗同一個物理帶。
+
+### 方位角不對稱
+
+`_gaussian_ring_image()` 加三個參數 `asym_amp / asym_azimuth_rad / asym_sigma_rad`，
+在既有的環上乘一個因子：
+
+```
+image *= 1 + asym_amp * exp(-0.5 (Δφ / asym_sigma_rad)^2)
+```
+
+`Δφ` 是在**環自己的座標系**（已經被 `pos_angle_rad` 旋轉過）裡量的方位角差，
+所以噴流足點跟著投影自轉軸走。`asym_amp = 0` 時影像與原本**完全相同**
+（`gr_eternal` 路徑一個位元都沒變）。副作用是 `position_angle` 在正對
+（`i = 0`）時也不再是 no-op——`gr_eternal` 在 `i = 0` 時旋轉一個圓環，
+實測影像變化 2.1e-16。
+
+### simulator 與 likelihood 的公式一致性
+
+兩條標度律只寫在 `ring_emission_from_params()` 一個地方。
+`ImageShadowSimulator.simulate()` 呼叫它，`VisibilityLikelihood` 透過呼叫
+simulator 取得模型影像，而 `VisibilityLikelihood.predictive_summary_stats()`
+與 `BHAccretion.summary_stats()` 也都改成呼叫它（原本各自複寫了一份
+`theta_d` / 亮度的算式）。測試 `TestSimulatorAndLikelihoodShareTheFormula`
+逐項比對 predictive stats 與 simulator metadata。
+
+模型辨識沿用 GW 模擬器的既有慣例（`if "log10_A" in params:`）：以哪一個亮度參數
+在場來分支。同時帶兩個、或一個都沒帶，都 raise（不是優先序規則）。
+`M / a_star / i / position_angle` 四個幾何參數改成**明確要求**，不再走
+`params.get(key, default)`——即 R.4 的靜默預設模式。
+
+### 逐參數活性（perturbation）
+
+在 FoV = 50 μas / 128 px（可表示網格）、`thermal_noise_jy = 0.05` 下，
+從 `M = 6.5e9, a* = 0.5, i = 0.9, PA = 0.7, log10_mdot = −2.5, f_jet = 0.3` 擾動：
+
+| 參數 | 擾動後 | 影像最大相對變化 | `max|ΔV| / max|V|` | `ΔlnL` |
+|---|---|---|---|---|
+| `M` | ×1.05 | > 1e−3 | 0.1025 | −1.5e6 |
+| `a_star` | 0.9 | > 1e−3 | 6.65e−3 | −6.53e3 |
+| `i` | 1.3 | > 1e−3 | 0.5427 | −4.22e7 |
+| `log10_mdot_edd` | −2.2 | > 1e−3 | 0.7619 | −8.31e7 |
+| `jet_power_frac` | 0.9 | > 1e−3 | 0.4198 | −2.52e7 |
+| **`position_angle`** | 1.9 | **~1.0** | **4.14e−4** | **+3.2** |
+
+**五個參數同時改變 simulator 輸出與 lnL。`position_angle` 沒有**——
+它把影像改了約 100%，可見度卻幾乎不動。原因不在 `bh_accretion`，見 X.12.5。
+
+### 兩個假說確實不同
+
+在**相同真值**（同環半徑、同厚度 0.1409、同峰值亮度 0.3162 Jy/μas²，
+唯一差別是噴流足點）下：
+
+| 量 | 數值 |
+|---|---|
+| 影像最大相對差 | **89.8%** |
+| 影像對 180° 旋轉的不對稱度 | `bh_accretion` **0.473** / `gr_eternal` **0.0**（精確） |
+| 同一筆 `bh_accretion` 資料上的 lnL 差 | **6.32e6** |
+| 參數向量交集 | `{M, a_star, i, position_angle}`；各自獨有 `{ring_width_frac, log10_brightness}` 與 `{log10_mdot_edd, jet_power_frac}` |
+
+## X.12.4 這一輪的產出檔案
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `src/whitesearch/utils/targets.py` | `ImageTarget` / `EHT_TARGETS` / `resolve_target_name` / `require_target` / `target_distance_mpc` | 是 |
+| `tests/test_image_target_and_accretion.py` | 58 項：目標解析與 fail-closed、逐目標可表示比例、吸積標度律、逐參數活性、兩假說差異 | 是 |
+
+## X.12.5 阻斷性問題 (III)：**`_compute_visibilities()` 的 Gλ → rad⁻¹ 換算錯誤**
+
+這是實作 I-1 的逐參數活性測試時發現的，**不在這次的 scope 內，沒有修**。
+
+### 症狀
+
+`position_angle` 把影像旋轉掉約 100%，模型可見度只變 4.14e−4。
+
+### 根因
+
+`simulators/image_shadow.py::_compute_visibilities()`：
+
+```python
+wavelength_m = C / (freq_ghz * 1e9)
+uv_rad = uv_coverage * 1e9 * wavelength_m  # Gλ → rad^{-1}
+```
+
+以 Gλ 為單位的基線**本來就是**「每弧度幾個週期」，也就是已經是 rad⁻¹；
+乘上波長（公尺）得到的是**基線的物理長度（公尺）**，不是空間頻率。
+在 230 GHz 下這個乘數是 1.3037e−3，於是每一條 EHT 基線都被縮小了約 767 倍。
+
+實測（FoV = 50 μas / 128 px，影像 FFT 的 uv 格點間距 2.06e9 rad⁻¹）：
+
+| | 值 |
+|---|---|
+| 現行換算後的 uv 範圍 | −3.91e6 – 8.47e6 rad⁻¹ |
+| 正確值（`uv * 1e9`） | −3.00e9 – 6.50e9 rad⁻¹ |
+| FFT 格點間距 | 2.06e9 rad⁻¹ |
+
+也就是 16 條基線**全部落在 uv 原點所在的那一個格子裡**（距原點 < 0.4% 格），
+雙線性內插回傳的就是零間距流量。
+
+### 後果（已量測）
+
+| 量 | 現行 | 正確取樣（直接 DFT） |
+|---|---|---|
+| `\|V\|` 在 16 條基線上 | 全部 = 總流量，165.68 vs 165.70 Jy（相對散布 1.3e−3） | 39.7 – 163.7 Jy |
+| `position_angle` 0.7 → 1.9 的 `max\|ΔV\|/max\|V\|` | 4.14e−4 | **0.571**（`max\|Δ\|V\|\|` 0.355） |
+| 同一擾動的逐基線 n-σ（σ = 0.05 Jy） | < 0.1 | 33 – 2385 |
+
+**image 通道的可見度目前只帶影像的總流量，不帶任何結構資訊。**
+其他五個參數之所以看起來還「活著」，是因為它們都會改變總流量
+（質量與傾角改環面積、吸積率改亮度與厚度、噴流改足點加亮）——
+不是因為通道量到了環的形狀。
+
+### 影響範圍
+
+同樣的錯誤換算也出現在 `dataio/eht.py::_mock_eht_data()`
+（`uv_rad = uv * 1e9 * wavelength_m`，用來產生 mock 的 sinc 可見度），
+所以「修一行」不準確：至少兩處，且修正會改變 image 通道**每一個**既有數字。
+
+### 分類
+
+**阻斷性，依規則回報後停下，未修。** 列為新的待決策 I-4。
+在此之前，image 通道的 SBC 不會是有意義的校準。
+測試 `test_position_angle_moves_the_image_but_not_the_visibilities` 把現況、
+正確取樣下的對照值、以及「若這個測試開始失敗代表換算已被修正」都鎖在 docstring 裡。

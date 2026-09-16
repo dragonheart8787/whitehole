@@ -39,7 +39,9 @@ def pbh_model():
 
 @pytest.fixture
 def gr_model():
-    return GREternalWhiteHole()
+    # The image channel holds the source distance fixed per target, so the
+    # model has to be told which target it describes.
+    return GREternalWhiteHole(target="M87*")
 
 
 @pytest.fixture
@@ -99,7 +101,6 @@ def gr_params():
     return {
         "M": 6.5e9,
         "a_star": 0.5,
-        "D_L": 16.8,
         "i": 1.1,
         "position_angle": 0.8,
         "log10_ne": -3.0,
@@ -157,6 +158,7 @@ def radio_context():
 @pytest.fixture
 def image_context():
     return {
+        "target": "M87*",
         "fov_muas": 200.0,
         "n_pixels": 32,
         "freq_ghz": 230.0,

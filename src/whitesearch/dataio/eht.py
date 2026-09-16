@@ -19,6 +19,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..utils.targets import resolve_target_name
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -81,7 +83,21 @@ class EHTLoader:
         source : str — 'M87' or 'SgrA'
         year : int — observation year (2017, 2018, 2021)
         band : str — 'LO' or 'HI'
+
+        Notes
+        -----
+        The returned dict carries a ``target`` key with the canonical name
+        ('M87*' / 'SgrA*').  The image forward model needs it: it holds the
+        source distance fixed rather than sampling it, and reads that distance
+        from the target.  Unknown source names raise here rather than producing
+        a record no downstream analysis can interpret.
+
+        The pre-existing ``source`` key also holds the target name, which
+        collides with the provenance meaning ``source`` carries on the GW and
+        radio paths ('GWOSC', 'MOCK_EXPLICIT', ...).  It is left in place for
+        backwards compatibility; ``target`` is the key the forward model reads.
         """
+        target = resolve_target_name(source)
         key = f"{source}_{year}_{band}"
         cache_path = self.cache_dir / f"{key}.npz"
         if cache_path.exists():
@@ -89,7 +105,7 @@ class EHTLoader:
 
         uvfits_path = self.cache_dir / f"{key}.uvfits"
         if EHTIM_AVAILABLE and uvfits_path.exists():
-            return self._load_ehtim(uvfits_path, source)
+            return self._load_ehtim(uvfits_path, source, target)
 
         logger.warning(
             "EHT L1 data for %s not found locally. "
@@ -97,16 +113,22 @@ class EHTLoader:
             "Returning mock visibility data.",
             key,
         )
-        return self._mock_eht_data(source, year, band)
+        return self._mock_eht_data(source, year, band, target)
 
-    def load_from_file(self, filepath: str | Path) -> dict[str, Any]:
-        """Load from a local UVFITS or HDF5 file."""
+    def load_from_file(self, filepath: str | Path, target: str) -> dict[str, Any]:
+        """Load from a local UVFITS or HDF5 file.
+
+        ``target`` is required, not inferred from the file: the forward model
+        turns it into the source distance, and a file that says nothing about
+        which source it holds cannot be analysed without being told.
+        """
+        canonical = resolve_target_name(target)
         path = Path(filepath)
         if not path.exists():
             raise FileNotFoundError(f"EHT data file not found: {path}")
         if EHTIM_AVAILABLE:
-            return self._load_ehtim(path, source="custom")
-        return self._parse_uvfits_minimal(path)
+            return self._load_ehtim(path, source=target, target=canonical)
+        return self._parse_uvfits_minimal(path, canonical)
 
     # ── Closure quantities ────────────────────────────────────────────────────
 
@@ -158,7 +180,7 @@ class EHTLoader:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    def _load_ehtim(self, path: Path, source: str) -> dict[str, Any]:
+    def _load_ehtim(self, path: Path, source: str, target: str) -> dict[str, Any]:
         try:
             obs = eh.obsdata.load_uvfits(str(path))
             u = obs.data["u"]
@@ -172,20 +194,30 @@ class EHTLoader:
                 "sigma": sigma,
                 "freq_ghz": obs.rf / 1e9,
                 "source": source,
+                "target": target,
                 "stations": obs.tarr["site"].tolist(),
                 "uv_coverage": np.column_stack([u, v]),
             }
         except Exception as exc:
             logger.error("ehtim load failed: %s", exc)
-            return self._mock_eht_data(source, 2017, "LO")
+            return self._mock_eht_data(source, 2017, "LO", target)
 
     def _load_cache(self, path: Path) -> dict[str, Any]:
         data = np.load(path, allow_pickle=True)
         return {k: data[k] for k in data.files}
 
     @staticmethod
-    def _mock_eht_data(source: str, year: int, band: str) -> dict[str, Any]:
-        """Return synthetic EHT-like visibility data for testing."""
+    def _mock_eht_data(
+        source: str, year: int, band: str, target: str | None = None
+    ) -> dict[str, Any]:
+        """Return synthetic EHT-like visibility data for testing.
+
+        ``target`` is resolved from ``source`` when not given, and set
+        explicitly on the record: mock data goes through the same forward model
+        as real data, so it needs the same per-target distance and must fail
+        the same way when the source is not a known target.
+        """
+        canonical = resolve_target_name(target if target is not None else source)
         from ..simulators.image_shadow import _default_eht_uv
 
         rng = np.random.default_rng(hash(f"{source}{year}{band}") % 2**32)
@@ -193,7 +225,7 @@ class EHTLoader:
         n_baselines = len(uv)
 
         # Mock M87*-like ring: shadow ~ 40 μas
-        ring_size_muas = 40.0 if source == "M87" else 50.0
+        ring_size_muas = 40.0 if canonical == "M87*" else 50.0
         from ..utils.constants import MUAS_RAD
         ring_rad = ring_size_muas * MUAS_RAD
 
@@ -216,12 +248,13 @@ class EHTLoader:
             "sigma": sigma,
             "freq_ghz": 230.0,
             "source": source,
+            "target": canonical,
             "stations": ["ALMA", "SMA", "JCMT", "SMTO", "LMT", "IRAM30", "SPT", "APEX"],
             "uv_coverage": uv,
         }
 
     @staticmethod
-    def _parse_uvfits_minimal(path: Path) -> dict[str, Any]:
+    def _parse_uvfits_minimal(path: Path, target: str) -> dict[str, Any]:
         """Minimal UVFITS parser (fallback without ehtim)."""
         try:
             from astropy.io import fits
@@ -231,6 +264,7 @@ class EHTLoader:
                     "u": data["UU"] if "UU" in data.dtype.names else np.array([]),
                     "v": data["VV"] if "VV" in data.dtype.names else np.array([]),
                     "source": "custom",
+                    "target": target,
                 }
         except Exception as exc:
             logger.error("Minimal UVFITS parse failed: %s", exc)

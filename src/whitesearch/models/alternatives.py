@@ -10,7 +10,7 @@ Models implemented here
 - MagnetarFlare         : coherent radio burst from magnetar giant flare
 - GRBAfterglowFRB       : GRB prompt emission or magnetar-powered FRB
 - StandardBHRingdown    : GR black hole merger ringdown (GW channel)
-- BHAccretion           : standard thin-disk black hole accretion (image channel)
+- BHAccretion           : black hole accretion-flow emission (image channel)
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from __future__ import annotations
 import numpy as np
 
 from .base import BaseModel, ParameterSpec
+from .gr_eternal import SPIN_MAX
+from ..utils.targets import ImageTarget, get_target
 
 
 class NullHypothesis(BaseModel):
@@ -300,54 +302,117 @@ class StandardBHRingdown(BaseModel):
 
 
 class BHAccretion(BaseModel):
-    """Standard thin-disk black hole accretion (image channel alternative).
+    """Black hole accretion-flow emission (image-channel alternative).
 
-    Used as the primary alternative to GR eternal white hole in image comparisons.
+    The primary alternative to the GR eternal white hole on the image channel,
+    and a genuinely different hypothesis rather than a relabelled one: here the
+    ring's brightness and thickness are both consequences of a single accretion
+    rate, and the ring is not azimuthally symmetric.
+
+    Phenomenological in the same sense as ``StandardBHRingdown`` on the GW
+    channel -- a declared scaling law with a free normalisation, not a
+    radiative-transfer calculation:
+
+    ``log10_mdot_edd``
+        Accretion rate in Eddington units.  Sets the peak surface brightness
+        (rising with rate) *and* the emission-ring thickness (falling with
+        rate, as a radiatively inefficient thick flow gives way to a thin
+        disc).  ``gr_eternal`` carries those as two independent free
+        parameters; tying them is the substance of this hypothesis.
+    ``jet_power_frac``
+        Fraction of the accretion power emerging in the jet, which brightens
+        the ring segment at the jet footpoint -- i.e. along the projected spin
+        axis.  ``gr_eternal``'s ring has no azimuthal structure at all.
+
+    Both laws live in ``simulators.image_shadow.ring_emission_from_params``,
+    which the simulator and ``VisibilityLikelihood`` both call, so there is one
+    copy of each expression rather than two that can drift.
+
+    ``D_L`` is NOT a parameter.  Like ``gr_eternal``, this model reads the
+    source distance from the analysis target; see ``utils.targets``.
+
+    Parameters
+    ----------
+    target : str | ImageTarget | None
+        Which source is being analysed ('M87*' or 'SgrA*').
     """
 
     name = "BHAccretion"
     channel = "image"
 
+    #: See GREternalWhiteHole.requires_target.
+    requires_target = True
+
+    def __init__(self, target: "str | ImageTarget | None" = None) -> None:
+        self.target = get_target(target) if target is not None else None
+
+    @property
+    def resolved_target(self) -> ImageTarget:
+        """The analysis target, or raise (fail-closed; see GREternalWhiteHole)."""
+        if self.target is None:
+            raise ValueError(
+                f"{self.name} needs to know which target it describes before it "
+                "can state a mass prior or a shadow size: the source distance "
+                "is a known constant on this channel, not a sampled parameter. "
+                "Construct it as get_model('bh_accretion', target='M87*'), or "
+                "use models.model_for_context(name, context)."
+            )
+        return self.target
+
     def parameters(self) -> list[ParameterSpec]:
+        tgt = self.resolved_target
         return [
             ParameterSpec(
                 name="M",
                 prior_type="log_uniform",
-                prior_kwargs={"low": 1e6, "high": 1e10},
+                prior_kwargs={
+                    "low": tgt.mass_prior_low_msun,
+                    "high": tgt.mass_prior_high_msun,
+                },
                 unit="M_sun",
-                description="BH mass",
+                description=(
+                    f"BH mass of {tgt.name}; same per-target prior as "
+                    f"gr_eternal so the two hypotheses are compared on the same "
+                    f"geometry ({tgt.mass_source})"
+                ),
                 latex=r"$M$",
             ),
             ParameterSpec(
                 name="a_star",
                 prior_type="uniform",
-                prior_kwargs={"low": 0.0, "high": 0.998},
+                prior_kwargs={"low": 0.0, "high": SPIN_MAX},
                 unit="dimensionless",
                 description="Dimensionless spin",
                 latex=r"$a_*$",
-            ),
-            ParameterSpec(
-                name="D_L",
-                prior_type="log_uniform",
-                prior_kwargs={"low": 1.0, "high": 2000.0},
-                unit="Mpc",
-                description="Luminosity distance",
-                latex=r"$D_L$",
             ),
             ParameterSpec(
                 name="i",
                 prior_type="cos_uniform",
                 prior_kwargs={},
                 unit="rad",
-                description="Inclination angle",
+                description="Inclination angle (0 = face-on); sets ring axial ratio",
                 latex=r"$i$",
+            ),
+            ParameterSpec(
+                name="position_angle",
+                prior_type="uniform",
+                prior_kwargs={"low": 0.0, "high": np.pi},
+                unit="rad",
+                description=(
+                    "Position angle of the projected spin axis, which is also "
+                    "where the jet footpoint brightens the ring"
+                ),
+                latex=r"$\xi$",
             ),
             ParameterSpec(
                 name="log10_mdot_edd",
                 prior_type="uniform",
                 prior_kwargs={"low": -5.0, "high": 0.0},
                 unit="log10(M_Edd)",
-                description="Log10 accretion rate in Eddington units",
+                description=(
+                    "Log10 accretion rate in Eddington units; sets both ring "
+                    "brightness and ring thickness"
+                ),
                 latex=r"$\log_{10}\dot{m}$",
             ),
             ParameterSpec(
@@ -355,25 +420,36 @@ class BHAccretion(BaseModel):
                 prior_type="log_uniform",
                 prior_kwargs={"low": 0.01, "high": 1.0},
                 unit="dimensionless",
-                description="Fraction of accretion power in jet",
+                description=(
+                    "Fraction of accretion power in the jet; sets the azimuthal "
+                    "brightness contrast at the jet footpoint"
+                ),
                 latex=r"$f_\mathrm{jet}$",
             ),
         ]
 
     def summary_stats(self, params: dict[str, float]) -> dict[str, float]:
         from ..utils.constants import G, C, M_SUN, MPC_M, MUAS_RAD
-        from ..utils.math_utils import kerr_qnm_frequency
+        from ..simulators.image_shadow import ring_emission_from_params
 
         M = params["M"]
         a = params["a_star"]
-        D_L = params["D_L"]
+        D_L = self.resolved_target.distance_mpc
 
         rg = G * M * M_SUN / C**2
         b_c = 3.0 * np.sqrt(3.0) * rg  # Schwarzschild approx
         theta_d_muas = 2.0 * b_c / (D_L * MPC_M) / MUAS_RAD
 
+        # Same function the simulator and the likelihood call, so the reported
+        # brightness/thickness are the ones actually imaged.
+        emission = ring_emission_from_params(params)
+
         return {
             "theta_d_muas": theta_d_muas,
+            "ring_width_muas": theta_d_muas * emission.ring_width_frac / 2.0,
+            "ring_brightness": emission.brightness,
+            "axial_ratio": float(np.abs(np.cos(params["i"]))),
+            "jet_contrast": 1.0 + emission.asym_amp,
             "mdot_edd": 10.0 ** params["log10_mdot_edd"],
             "spin": a,
             "D_L_mpc": D_L,
