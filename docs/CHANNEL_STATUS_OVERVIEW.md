@@ -21,7 +21,7 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.13） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.14） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -94,8 +94,8 @@ SBC/coverage campaign 的通道。
 
 ### image / VLBI（`gr_eternal`、`bh_accretion`）
 
-**成熟度：forward model 與先驗皆已到位，具備跑一次有意義校準的條件。**
-仍未跑過任何 SBC/campaign，所以**沒有任何 coverage 證據**。
+**成熟度：forward model 與先驗皆已到位，但 SBC 在這個環境跑不完。**
+仍**沒有任何 coverage 證據**——第一次 campaign 嘗試因取樣成本受阻，見 I-6。
 
 | 已完成的修正 | commit |
 |---|---|
@@ -119,8 +119,9 @@ SBC/coverage campaign 的通道。
 
 | 項目 | 分類 |
 |---|---|
+| **SBC 跑不完**：先驗預測 SNR 橫跨 0.2–3.2e5，巢狀取樣成本隨資訊量爆炸。實測單筆 SNR 158 要 3292 s / 1.3e6 次 likelihood 呼叫；N=100 估計約 145 小時 | **阻塞性，已回報未修**（見待決策 I-6） |
 | `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
-| **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」 | 待執行 |
+| **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」；第一次嘗試已執行但未完成（I-6） | 待執行 |
 | 影像網格對薄環的響應**非單調**（3 px 0.1217、4 px 0.0003、5 px 0.9749），是取樣假影；現行網格下兩個目標都遠在下界之上，實務上不觸發 | **已定性但選擇不修** |
 | image 通道沒有 preprocess 模組 | **需要你做一個設計決定** |
 | `null` 模型無法注入到 image 通道（模擬器沒有 null 分支，`M` 缺失即 raise）。這是 `cda3003` 之前就有的行為，不是本輪引入 | **已定性，未修** |
@@ -270,6 +271,35 @@ SBC/coverage campaign 的通道。
   （`closure % 2π − π` 把零閉合映到 −π）。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.4。
 
+### I-6｜image｜SBC 的取樣成本 —— **第一次 campaign 未能完成**
+
+- **做了什麼**：`gr_eternal`、M87\*、6 維、`use_closure_phases=False`
+  （amplitude-only，明確聲明，因 I-5 未修）、dynesty `bound='live'` /
+  `sample='rwalk'` / `nact=2` / `nlive=250` / L=100。
+  `nact` 生效已用行為驗證（bilby 印 "An average of 4 steps will be accepted"，
+  且完成的 result JSON 內 `sampler_kwargs` 含 `nact: 2`）。
+- **順帶修好**：bilby 的 `check_point_delta_t` 預設 600 s 比一個 shard 還長，
+  所以從來沒寫出過 resume 檔；改為 45 s 之後 resume 實測生效。
+- **量到的成本**：唯一走完全程的中等注入（SNR 158）要
+  **3292 s / 4574 次迭代 / 約 1.3e6 次 likelihood 呼叫**，且明顯減速
+  （`nc` 54 → 1081，效率 3.9% → 0.4%）。SNR ≳ 1500 的注入全部逾時。
+  likelihood 本身只要 1.755 ms/呼叫，**瓶頸是呼叫次數不是單次成本**。
+- **原因**：`log10_brightness` 是 6 dex 的自由振幅，先驗預測 SNR 橫跨
+  0.2–3.2e5；NS 迭代數 ≈ `nlive × H`，而 H 隨 ln(SNR) 成長。
+  N=100 的期望總成本約 **145 小時**，尾部很重。
+- **為什麼沒有「設上限、用跑完的筆數回報」**：收斂與否幾乎完全由 SNR 決定，
+  任何時間上限都只會留下最安靜的注入——那些注入的後驗幾乎就是先驗，
+  rank 自然均勻。那會產生一份**看起來校準良好但純屬選擇效應**的報告。
+  因此本輪**不回報任何 rank / KS p 值 / coverage 數字**。
+- **要決定的**：如何讓這條通道的 SBC 成本可負擔。可能的方向（未執行、
+  未替任何一個背書）：縮小 `log10_brightness` 先驗或改為以總流量參數化、
+  降低 `nlive`、換 `bound`/`sample` 策略、或接受在別的機器上長跑。
+  **這些都會改動先驗或取樣設定，屬於設計決定，不是機械修正。**
+- **分類**：**需要你做一個設計決定**。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.14。
+  可續跑的 harness 在 `scripts/run_image_sbc.py`，
+  原始數字在 `docs/calibration/image_gr_eternal_sbc_cost_probe.csv`。
+
 ### X-1｜xray｜整條通道要不要投入實作
 
 - **要決定的**：(a) 是否投入；若投入，(b) `XRayBurstLikelihood.parameter_names`
@@ -313,12 +343,14 @@ SBC/coverage campaign 的通道。
 
 ### image SBC
 
-- **沒有任何 image campaign 的耗時量測。**
-- **先決條件已滿足**：I-4 已修，可見度帶影像結構；I-3 已修，先驗 100% 可表示。
-- **可直接推算的**：先驗抽樣 SNR ≥ 8 的比例是 `gr_eternal` **81.2%**、
-  `bh_accretion` **66.0%**，所以 N=100 的 campaign 期望有 66–81 筆帶可偵測訊號
-  （對照 GW 通道的 0.785%，約 0.8 筆）。
-- **取樣維度**：兩個模型都是 6 維。單次 likelihood 評估的可見度計算約 1.2 ms。
+- **已量測**（X.14，不再是推算）：單筆 SNR 158 的注入需 **3292 s /
+  1.3e6 次 likelihood 呼叫**；SNR ≳ 1500 的注入在 120–240 s 內遠未收斂。
+- **外推**：先驗 SNR 中位數 581 → 單筆約 87 分；95 百分位 5.9e5 → 約 6 小時。
+  **N=100 約 145 小時**，N=20 約 29 小時。
+- **likelihood 單次成本 1.755 ms**（`_compute_visibilities` 占 1.126 ms）。
+  即使完全消除，單筆仍約 1900 s——瓶頸是呼叫次數。
+- **在本執行環境不可行**：容器在 turn 之間暫停，只能以 ≤ 600 s 的前景
+  片段推進。
 
 ### X-1 若要實作 xray
 
@@ -377,5 +409,12 @@ SBC/coverage campaign 的通道。
   以及 Kerr 陰影半徑的兩個公式**都**偏離精確臨界曲線（X.13.3）。
   **教訓：forward-model 一致性是必要條件，不是充分條件。每一個把物理量
   轉成儀器量的換算，都要另外對一個不是本專案產生的數字。**
+- **「可偵測」與「可取樣」是兩件事，readiness 評估要分開看。**
+  X.13.8 判定 image 通道具備校準條件時，依據之一是先驗抽樣 SNR ≥ 8 的比例
+  81.2%（對比 GW 的 0.785%）——那只看了可偵測性。極高的 SNR 對偵測是好事，
+  對巢狀取樣卻是成本來源：資訊量 H 越大、需要壓縮的先驗體積越多，
+  迭代數 ≈ `nlive × H`。GW 通道的 campaign 跑得動，部分正是因為它的注入
+  大多很安靜。**判準應補上：先驗預測的資訊量分布要落在取樣器負擔得起的
+  範圍內**（X.14.5）。
 - **preprocess 模組的接線狀況不一致**：GW 有接（`gw_observation.py`），
   radio 與 xray 的 preprocessor 沒有任何呼叫端，image 根本沒有模組。

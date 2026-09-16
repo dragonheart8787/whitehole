@@ -979,3 +979,129 @@ Sgr A\* 2.0–2.5 Jy（EHT 2022 ApJL 930 L12）——**真值整個落在先驗�
    或者用 `use_closure_phases=False` 明確聲明 amplitude-only。
 2. **從未跑過任何 SBC**。上表說的是「條件已具備」，**不是「已校準」**。
    在跑過 SBC 之前，這條通道沒有任何 coverage 證據。
+
+---
+
+# X.14 image 通道 gr_eternal 首次 SBC/coverage 校準驗證 —— **未能完成，回報阻塞原因**
+
+> 這一節記錄第一次嘗試對 image 通道跑 SBC/coverage 的結果。
+> **沒有產生任何 SBC 結論**，因為 campaign 在這個執行環境裡跑不完。
+> 這裡記的是量測到的耗時與阻塞原因，以及一個必須誠實說明的取樣偏差風險。
+> 不含任何科學結論。
+
+## X.14.1 設定
+
+| 項目 | 值 |
+|---|---|
+| 模型 / 通道 | `gr_eternal` / image |
+| 目標 | M87\*（`SgrA*` 未跑） |
+| 取樣維度 | 6（`M, a_star, i, position_angle, ring_width_frac, log10_brightness`） |
+| `use_closure_phases` | **False**（amplitude-only，明確聲明；I-5 未修，本輪不宣稱使用 closure phase） |
+| sampler | dynesty，`bound='live'`、`sample='rwalk'`、`nact=2`、`dlogz=0.1` |
+| `nlive` | 250 |
+| L（rank 分母） | 100 |
+| 逾時機制 | `BilbyRunner.run_timeout_s` → `_BudgetGuard`（在 likelihood 內部檢查） |
+
+**`nact` 生效已驗證**（比照 Part K.2 的教訓，看行為不看鍵是否存在）：
+bilby log 印出 `An average of 4 steps will be accepted up to chain length 5000`
+（= 2 × nact），且完成的那一筆 result JSON 裡 `sampler_kwargs` 確實含
+`{'bound': 'live', 'sample': 'rwalk', 'nact': 2, 'dlogz': 0.1}`。
+
+**順帶修好 checkpoint/resume**：bilby 的 `check_point_delta_t` 預設 600 s，比
+一個 shard 還長，所以**從來沒有寫出過 resume 檔**，每個 shard 都從頭跑。
+改為 45 s 之後 resume 確實生效（實測：shard 結束在 1669 it，下一個 shard
+印出 `Reading resume file ...` 並從該處續跑到 2155 it）。
+
+## X.14.2 量測到的耗時
+
+`docs/calibration/image_gr_eternal_sbc_cost_probe.csv`。
+
+| idx | 網路 SNR | 總流量 (Jy) | `log10_brightness` | 結果 | 牆鐘 |
+|---|---|---|---|---|---|
+| 4 | 0.21 | 0.0033 | −3.53 | **收斂** | **34 s** |
+| 0 | 158 | 2.27 | −0.66 | **收斂** | **3292 s（≈55 分）** |
+| 3 | 1504 | 21.0 | +0.08 | 逾時 | 120 s |
+| 1 | 1560 | 24.5 | −1.50 | 逾時（dlogz 仍 2150） | 240 s |
+| 2 | 15755 | 283 | +0.69 | 逾時 | 120 s |
+| 5 | 318443 | 5542 | +1.21 | 逾時 | 120 s |
+
+唯一一筆走完全程的中等 SNR 注入（idx 0，SNR 158）：
+**4574 次 NS 迭代、約 1.3e6 次 likelihood 呼叫、3292 s**，
+分 8 個 shard 以 resume 累積完成。收斂過程明顯減速：
+
+| 累積牆鐘 | 迭代 | `nc`（每迭代呼叫數） | 效率 | 剩餘 `dlogz` |
+|---|---|---|---|---|
+| 100 s | 1669 | 54 | 3.9% | 308 |
+| 200 s | 2155 | 238 | 2.5% | 113 |
+| 740 s | 3221 | 314 | 1.0% | 11.9 |
+| 1280 s | 3658 | 511 | 0.7% | 4.53 |
+| 1825 s | 3977 | 631 | 0.5% | 2.10 |
+| 2370 s | 4232 | 744 | 0.4% | 0.885 |
+| 2915 s | 4574 | 1081 | 0.4% | 0.236 |
+| 3292 s | — | — | — | **收斂** |
+
+likelihood 本身是 **1.755 ms/呼叫**（其中 1.126 ms 在
+`_compute_visibilities`，主要是 `c_einsum`）。即使把它完全消掉，
+單筆仍要約 1900 s——**瓶頸是呼叫次數，不是單次成本**。
+
+## X.14.3 阻塞原因：先驗預測的 SNR 跨度讓 NS 成本爆炸
+
+巢狀取樣的迭代數約為 `nlive × H`，H 是後驗相對先驗的資訊量（nats），
+而 H 隨 SNR 對數成長、隨維度線性成長。idx 0 的 H ≈ 4574 / 250 ≈ **18.3 nats**。
+
+`log10_brightness ~ Uniform(−4, 2)` 是一個 **6 dex** 的自由振幅，而熱噪聲固定
+在 0.05 Jy，於是先驗預測的 SNR 橫跨 **0.2 到 3.2e5**（上一輪量到的百分位
+[5, 50, 95] = [0.4, 581, 5.9e5]）。在 SNR ~ 3e5 的那一端，
+H ≈ 6 × ln(3e5) ≈ 76 nats → 迭代數 ≈ 19000，且 `nc` 早已超過 1000，
+單筆估計 10 小時以上。
+
+以 `呼叫數 ∝ (ln SNR)²` 外推（迭代數與 `nc` 各約正比於 ln SNR，
+與 idx 0 的實測對齊）：
+
+| 先驗 SNR 百分位 | 估計單筆牆鐘 |
+|---|---|
+| 5%（SNR 0.4） | 秒級 |
+| 50%（SNR 581） | ≈ 5200 s（87 分） |
+| 95%（SNR 5.9e5） | ≈ 22000 s（6 小時） |
+
+**N=100 的期望總成本約 145 小時，且尾部很重。** 這個執行環境的容器在
+turn 之間會暫停，實際只能以 ≤ 600 s 的前景片段推進，所以連 N=20
+（估計 29 小時）都不實際。
+
+## X.14.4 為什麼不能「設一個時間上限、用跑完的筆數回報」
+
+前幾輪（Part K / Part L）遇到耗時問題時的做法是設定每筆時間上限、
+用已完成的筆數回報。**這一次那個做法會產生無效的結果，必須說清楚。**
+
+上表顯示收斂與否幾乎完全由 SNR 決定：跑完的兩筆是 SNR 0.21（後驗≈先驗，
+34 s）與 SNR 158（3292 s），其餘 SNR ≳ 1500 的全部逾時。因此任何時間上限
+都會**系統性地只留下最安靜的注入**——而那些注入的後驗幾乎就是先驗，
+rank 當然接近均勻。**這會產生一份看起來校準良好、但完全是選擇效應造成的
+SBC 報告。** 這正是「不要調整讓結果好看」要防的情況，所以本輪
+**不回報任何 SBC rank / KS p 值 / coverage 數字**。
+
+（`SgrA*` 組同理未跑。）
+
+## X.14.5 修正上一輪 readiness 評估裡的一個疏漏
+
+X.13.8 判定 image 通道「具備跑一次有意義校準的條件」，依據之一是
+先驗抽樣 SNR ≥ 8 的比例 81.2%，並與 GW 通道的 0.785% 對比。
+**那個評估只看了可偵測性，沒有看取樣成本。** 極高的 SNR 對偵測是好事，
+對巢狀取樣卻是成本來源——資訊量 H 越大、需要的先驗體積壓縮越多。
+GW 通道的 campaign 之所以跑得動，部分正是因為它的注入大多很安靜。
+
+**應該補上的判準**：一條通道「可以跑校準」不只要求真值落在先驗內、
+參數全部生效、資料可被表示，還要求**先驗預測的資訊量分布落在取樣器
+負擔得起的範圍內**。image 通道目前不滿足最後這一項。
+
+## X.14.6 已產出、可續跑的東西
+
+| 路徑 | 內容 | 是否進版控 |
+|---|---|---|
+| `scripts/run_image_sbc.py` | 可續跑的 shard runner：每筆一個 JSON、已存在即跳過；resume 已修好（`check_point_delta_t=45`）；per-run 逾時走 `_BudgetGuard` | 是 |
+| `docs/calibration/image_gr_eternal_sbc_cost_probe.csv` | 上表的原始數字 | 是 |
+| `artifacts/image_sbc/`、`artifacts/image_probe/` | 逐筆 JSON 與 bilby resume 檔 | 否（artifacts） |
+
+idx 0 的完整後驗已存在（880 samples），可作為日後續跑的第一筆。
+**單筆的 rank 與 coverage 不構成校準證據**（N=1 下 rank 本來就均勻分布），
+所以這裡不列出。
