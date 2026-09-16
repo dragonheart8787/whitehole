@@ -1,0 +1,12 @@
+parameterisation,prior,dex,idx,snr,status,wall_s
+peak_brightness,"log10_brightness U(-4,2)",6.0,4,0.21,converged,34
+peak_brightness,"log10_brightness U(-4,2)",6.0,0,158.3,converged,3292
+peak_brightness,"log10_brightness U(-3.38,-0.68)",2.7,0,9.7,converged,380
+peak_brightness,"log10_brightness U(-3.38,-0.68)",2.7,3,35.6,converged,1006
+peak_brightness,"log10_brightness U(-3.38,-0.68)",2.7,2,173.4,timeout,730
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,4,4.8,converged,64
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,1,31.3,converged,256
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,0,73.5,converged,552
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,3,149.2,converged,627
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,2,201.2,timeout,1438
+total_flux,"log10_total_flux_jy U(-1.301,1.079)",2.38,5,334.1,timeout,365

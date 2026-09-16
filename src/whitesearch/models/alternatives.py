@@ -444,10 +444,15 @@ class BHAccretion(BaseModel):
         # brightness/thickness are the ones actually imaged.
         emission = ring_emission_from_params(params)
 
+        # `amplitude` IS the peak surface brightness here: bh_accretion
+        # normalises on brightness (its accretion rate sets I0 directly),
+        # unlike gr_eternal, which samples the integrated flux and derives I0.
+        assert emission.normalisation == "peak_brightness"
+
         return {
             "theta_d_muas": theta_d_muas,
             "ring_width_muas": theta_d_muas * emission.ring_width_frac / 2.0,
-            "ring_brightness": emission.brightness,
+            "ring_brightness": emission.amplitude,
             "axial_ratio": float(np.abs(np.cos(params["i"]))),
             "jet_contrast": 1.0 + emission.asym_amp,
             "mdot_edd": 10.0 ** params["log10_mdot_edd"],

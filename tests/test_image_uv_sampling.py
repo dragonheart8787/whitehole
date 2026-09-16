@@ -352,3 +352,151 @@ class TestKerrShadowRadius:
             for inc in (0.0, 1.2):
                 half = model.shadow_angular_diameter_muas(6.5e9, a, 16.8, inc) / 2.0
                 assert half == _shadow_radius_muas(6.5e9, a, 16.8, inc)
+
+
+class TestFluxParameterisation:
+    """X.16: gr_eternal samples the integrated flux, not the peak brightness.
+
+    The regression this locks in: the image's actual total flux must equal
+    ``10 ** log10_total_flux_jy`` exactly.  Under the old parameterisation the
+    sampled quantity was the peak surface brightness and the flux was derived
+    through the geometry factor ``G``, which spans 2.264 dex across the prior --
+    so "this source emits about 1 Jy" could not be written as a prior at all.
+    """
+
+    CTX = {"target": "M87*", "fov_muas": FOV, "n_pixels": NPIX,
+           "freq_ghz": 230.0, "thermal_noise_jy": 0.05}
+    TRUTH = {"M": 6.5e9, "a_star": 0.5, "i": 0.9, "position_angle": 0.7,
+             "ring_width_frac": 0.12, "log10_total_flux_jy": 0.0}
+
+    @pytest.mark.parametrize("log10_flux", [-1.3, -0.7, 0.0, 0.6, 1.08])
+    def test_imaged_flux_equals_the_sampled_flux(self, log10_flux):
+        theta = {**self.TRUTH, "log10_total_flux_jy": log10_flux}
+        data = ImageShadowSimulator().simulate(
+            theta, self.CTX, rng=np.random.default_rng(0)
+        )
+        imaged = data.metadata["image"].sum() * (2.0 * FOV / NPIX) ** 2
+        assert imaged == pytest.approx(10.0**log10_flux, rel=1e-12)
+        assert data.metadata["total_flux_jy"] == pytest.approx(imaged, rel=1e-12)
+
+    @pytest.mark.parametrize(
+        "name,values",
+        [("M", [3.5e9, 9.5e9]), ("i", [0.2, 1.3]),
+         ("ring_width_frac", [0.02, 0.45]), ("a_star", [0.0, 0.95])],
+    )
+    def test_geometry_no_longer_leaks_into_the_flux(self, name, values):
+        """The whole point: changing geometry must not change the flux."""
+        fluxes, brightnesses = [], []
+        for v in values:
+            d = ImageShadowSimulator().simulate(
+                {**self.TRUTH, name: v}, self.CTX, rng=np.random.default_rng(0)
+            )
+            fluxes.append(d.metadata["total_flux_jy"])
+            brightnesses.append(d.metadata["brightness_jy_per_muas2"])
+        assert fluxes[0] == pytest.approx(fluxes[1], rel=1e-12), name
+        # ...and the derived peak brightness absorbs it instead.
+        assert brightnesses[0] != pytest.approx(brightnesses[1], rel=1e-6), name
+
+    def test_brightness_is_the_flux_divided_by_the_geometry_factor(self):
+        d = ImageShadowSimulator().simulate(
+            self.TRUTH, self.CTX, rng=np.random.default_rng(0)
+        )
+        assert d.metadata["brightness_jy_per_muas2"] == pytest.approx(
+            d.metadata["total_flux_jy"] / d.metadata["geometry_factor_muas2"]
+        )
+        assert d.metadata["normalisation"] == "total_flux"
+
+    def test_bh_accretion_still_normalises_on_peak_brightness(self):
+        """Its rate drives I0 directly; that coupling is the hypothesis."""
+        accretion = {"M": 6.5e9, "a_star": 0.5, "i": 0.9, "position_angle": 0.7,
+                     "log10_mdot_edd": -3.0, "jet_power_frac": 0.3}
+        d = ImageShadowSimulator().simulate(
+            accretion, self.CTX, rng=np.random.default_rng(0)
+        )
+        assert d.metadata["normalisation"] == "peak_brightness"
+        assert d.metadata["brightness_jy_per_muas2"] == pytest.approx(1e-3)
+
+    def test_prior_is_built_from_the_measured_flux_not_the_old_bounds(self):
+        from whitesearch.utils.targets import EHT_TARGETS
+
+        for name, tgt in EHT_TARGETS.items():
+            spec = next(
+                s for s in get_model("gr_eternal", target=name).parameters()
+                if s.name == "log10_total_flux_jy"
+            )
+            lo, hi = spec.prior_kwargs["low"], spec.prior_kwargs["high"]
+            # one decade of margin either side of the published range
+            assert lo == pytest.approx(np.log10(tgt.flux_low_jy) - 1.0, abs=1e-9)
+            assert hi == pytest.approx(np.log10(tgt.flux_high_jy) + 1.0, abs=1e-9)
+            assert lo < np.log10(tgt.flux_low_jy) < np.log10(tgt.flux_high_jy) < hi
+            assert tgt.flux_source.strip()
+        # the two targets differ in flux, so the priors are not the same
+        m87 = get_model("gr_eternal", target="M87*").parameters()
+        sgra = get_model("gr_eternal", target="SgrA*").parameters()
+        f = lambda specs: next(s.prior_kwargs for s in specs
+                               if s.name == "log10_total_flux_jy")
+        assert f(m87) != f(sgra)
+
+    def test_every_parameter_still_moves_the_visibilities_and_the_likelihood(self):
+        """No new dead parameter was created by the reparameterisation."""
+        from whitesearch.likelihoods import VisibilityLikelihood
+
+        like = VisibilityLikelihood("gr_eternal", use_closure_phases=False)
+        base = ImageShadowSimulator().simulate(
+            self.TRUTH, self.CTX, rng=np.random.default_rng(3)
+        )
+        ll0 = like.loglike(self.TRUTH, base, self.CTX)
+        base_vis = np.abs(base.metadata["vis_signal"])
+        perturbed = {"M": 6.5e9 * 1.08, "a_star": 0.95, "i": 1.3,
+                     "position_angle": 1.9, "ring_width_frac": 0.30,
+                     "log10_total_flux_jy": 0.35}
+        assert sorted(perturbed) == sorted(
+            VisibilityLikelihood("gr_eternal").parameter_names
+        )
+        for name, value in perturbed.items():
+            theta = {**self.TRUTH, name: value}
+            moved = np.abs(
+                ImageShadowSimulator()
+                .simulate(theta, self.CTX, rng=np.random.default_rng(3))
+                .metadata["vis_signal"]
+            )
+            rel = np.abs(moved - base_vis).max() / base_vis.max()
+            assert rel > 1e-3, f"{name} does not move the visibilities"
+            assert abs(like.loglike(theta, base, self.CTX) - ll0) > 1.0, name
+
+
+class TestUnrepresentableRingIsRejectedNotFatal:
+    """A geometry the grid cannot image must not abort a sampling run."""
+
+    CTX = TestFluxParameterisation.CTX
+    TRUTH = TestFluxParameterisation.TRUTH
+
+    def test_build_ring_image_raises_for_a_degenerate_ring(self, monkeypatch):
+        from whitesearch.simulators import image_shadow
+
+        monkeypatch.setattr(
+            image_shadow, "_gaussian_ring_image",
+            lambda *a, **k: np.zeros((NPIX, NPIX)),
+        )
+        with pytest.raises(image_shadow.UnrepresentableRingError, match="between pixels"):
+            image_shadow.build_ring_image(self.TRUTH, self.CTX)
+
+    def test_likelihood_returns_minus_inf_and_counts_it(self, monkeypatch):
+        from whitesearch.likelihoods import VisibilityLikelihood
+        from whitesearch.likelihoods import visibility as vis_mod
+        from whitesearch.simulators.image_shadow import UnrepresentableRingError
+
+        data = ImageShadowSimulator().simulate(
+            self.TRUTH, self.CTX, rng=np.random.default_rng(0)
+        )
+        like = VisibilityLikelihood("gr_eternal", use_closure_phases=False)
+        assert np.isfinite(like.loglike(self.TRUTH, data, self.CTX))
+        assert like.n_unrepresentable == 0
+
+        def boom(*a, **k):
+            raise UnrepresentableRingError("falls between pixels")
+
+        monkeypatch.setattr(vis_mod, "build_ring_image", boom)
+        assert like.loglike(self.TRUTH, data, self.CTX) == float("-inf")
+        assert like.n_unrepresentable == 1
+        assert "between pixels" in like.last_unrepresentable

@@ -16,8 +16,8 @@ from numpy.typing import NDArray
 from .base import BaseLikelihood, gaussian_loglike, von_mises_loglike
 from ..simulators.image_shadow import (
     ImageShadowSimulator,
-    _shadow_radius_muas,
-    ring_emission_from_params,
+    UnrepresentableRingError,
+    build_ring_image,
 )
 from ..utils.targets import require_target
 
@@ -39,7 +39,7 @@ class VisibilityLikelihood(BaseLikelihood):
     #: the context, not a sampled parameter -- see utils.targets.
     RING_PARAMETERS = [
         "M", "a_star", "i", "position_angle",
-        "ring_width_frac", "log10_brightness",
+        "ring_width_frac", "log10_total_flux_jy",
     ]
 
     #: Parameters the accretion-flow hypothesis (bh_accretion) reads.  It
@@ -92,6 +92,9 @@ class VisibilityLikelihood(BaseLikelihood):
         self.robust = robust_data
         #: Provenance of the most recent evaluation's closure-phase decision.
         self.last_closure_config: dict[str, Any] = {}
+        #: How many evaluations hit a ring the image grid cannot represent.
+        self.n_unrepresentable: int = 0
+        self.last_unrepresentable: str | None = None
 
     @property
     def parameter_names(self) -> list[str]:
@@ -144,6 +147,21 @@ class VisibilityLikelihood(BaseLikelihood):
         # missing target raises instead of falling back: the target fixes the
         # source distance, and the two supported targets differ by 3.31 dex.
         model_context["target"] = require_target(meta, context).name
+
+        # A geometry the image grid cannot represent has no model prediction,
+        # so the sampler must reject the point rather than crash the run.  The
+        # previous parameterisation reached the same place numerically: those
+        # rings imaged to ~zero flux and scored an arbitrarily bad likelihood.
+        # Counted, not swallowed -- `n_unrepresentable` says how often it fired.
+        # Checked against `model_context`, so the target (hence the distance,
+        # hence the ring radius) is the metadata-first one.
+        try:
+            build_ring_image(theta, model_context)
+        except UnrepresentableRingError as exc:
+            self.n_unrepresentable += 1
+            self.last_unrepresentable = str(exc)
+            return float("-inf")
+
         sim = ImageShadowSimulator()
         sim_data = sim.simulate(theta, model_context, rng=np.random.default_rng(0))
         model_vis = np.asarray(sim_data.data, dtype=complex)
@@ -246,7 +264,13 @@ class VisibilityLikelihood(BaseLikelihood):
         theta: dict[str, float],
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        """Ring diameter, axial ratio, thickness and brightness for PPC.
+        """Ring diameter, axial ratio, thickness, flux and brightness for PPC.
+
+        Built by ``build_ring_image``, the same function the simulator uses, so
+        the posterior-predictive numbers cannot be computed from a slightly
+        different forward model than the one that was fit.  That includes the
+        ``I0 = F / G`` inversion: the sampled amplitude is the integrated flux
+        and the peak surface brightness is derived from it.
 
         The return is ``dict[str, Any]`` rather than ``dict[str, float]``
         because it also carries ``emission_model``, the provenance string
@@ -258,20 +282,13 @@ class VisibilityLikelihood(BaseLikelihood):
         distance, so a posterior-predictive check cannot be comparing against a
         slightly different forward model than the one that was fit.
         """
-        D_L = require_target(context).distance_mpc
-        emission = ring_emission_from_params(theta)
-        # inclination_rad matters: the Kerr shadow's areal radius depends on the
-        # viewing angle at the ~2% level, and the simulator passes it.  Omitting
-        # it here would reintroduce, in miniature, exactly the model-vs-simulator
-        # ring-size disagreement that audit X.13.3 closed.
-        theta_d = 2.0 * _shadow_radius_muas(
-            theta["M"], theta["a_star"], D_L, inclination_rad=theta["i"]
-        )
-
+        built = build_ring_image(theta, context)
         return {
-            "theta_d_muas": theta_d,
-            "axial_ratio": float(np.abs(np.cos(theta["i"]))),
-            "ring_width_muas": theta_d * emission.ring_width_frac / 2.0,
-            "brightness": emission.brightness,
-            "emission_model": emission.emission_model,
+            "theta_d_muas": 2.0 * built.r_ring_muas,
+            "axial_ratio": built.axial_ratio,
+            "ring_width_muas": built.w_ring_muas,
+            "total_flux_jy": built.total_flux_jy,
+            "brightness": built.brightness,
+            "geometry_factor_muas2": built.geometry_factor_muas2,
+            "emission_model": built.emission.emission_model,
         }

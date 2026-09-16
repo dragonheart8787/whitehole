@@ -106,7 +106,9 @@ def gr_params():
         "log10_ne": -3.0,
         "log10_B": -5.0,
         "ring_width_frac": 0.1,
-        "log10_brightness": 0.5,
+        # gr_eternal samples the ring's INTEGRATED flux, not its peak surface
+        # brightness; 10^0 = 1 Jy sits inside M87*'s measured 0.5-1.2 Jy.
+        "log10_total_flux_jy": 0.0,
     }
 
 

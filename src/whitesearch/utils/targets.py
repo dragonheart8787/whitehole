@@ -45,7 +45,13 @@ class ImageTarget:
         published measurements, not to make the ring representable on any
         particular image grid; the grid is checked against the prior, never the
         other way round.
-    distance_source, mass_source : literature citations for the two above.
+    flux_low_jy, flux_high_jy : measured compact 230 GHz flux density [Jy].
+    flux_prior_low_jy, flux_prior_high_jy : the log-uniform prior this project
+        samples for ``log10_total_flux_jy``.  One decade of margin on either
+        side of the measured range -- wide enough not to exclude source
+        variability or a different split between ring and extended emission,
+        narrow enough that the prior still says "this is an EHT source".
+    distance_source, mass_source, flux_source : literature citations.
     """
 
     name: str
@@ -55,6 +61,11 @@ class ImageTarget:
     mass_prior_low_msun: float
     mass_prior_high_msun: float
     mass_source: str
+    flux_low_jy: float
+    flux_high_jy: float
+    flux_prior_low_jy: float
+    flux_prior_high_jy: float
+    flux_source: str
 
 
 #: Targets this project's image channel knows how to analyse.
@@ -72,6 +83,19 @@ class ImageTarget:
 #: M = (4.154 +/- 0.014|stat +/- 0.014|sys) x 10^6 M_sun.  The prior is widened
 #: to [3.5e6, 5.0e6] to cover the independent Keck orbit fit,
 #: M = 3.975e6 +/- 0.058e6 at R0 = 7959 pc (Do et al. 2019, Science 365, 664).
+#:
+#: Compact 230 GHz flux densities, which set the ``log10_total_flux_jy`` prior:
+#: M87* 0.5-1.2 Jy (EHT Collaboration 2019, ApJL 875, L1 / L4 -- the compact
+#: ring carries ~0.5 Jy of the ~1.2 Jy seen on the shortest baselines) and
+#: Sgr A* 2.0-2.5 Jy (EHT Collaboration 2022, ApJL 930, L12).  The prior takes
+#: one decade of margin each side, so M87* samples [0.05, 12] Jy (2.380 dex)
+#: and Sgr A* [0.2, 25] Jy (2.097 dex).  Both targets are variable -- Sgr A* by
+#: factors of order unity on hour timescales -- and how much of the total flux
+#: belongs to the modelled ring rather than to extended structure is itself
+#: uncertain, so a decade either way is margin for the modelling split, not
+#: padding.  The prior is per target for the same reason the mass prior is:
+#: the two sources differ by a factor ~3 in flux and stating one union prior
+#: would put each target off-centre.
 EHT_TARGETS: dict[str, ImageTarget] = {
     "M87*": ImageTarget(
         name="M87*",
@@ -81,6 +105,11 @@ EHT_TARGETS: dict[str, ImageTarget] = {
         mass_prior_low_msun=3.0e9,
         mass_prior_high_msun=1.0e10,
         mass_source="EHT 2019 ApJL 875 L6; Gebhardt+2011 ApJ 729 119; Walsh+2013 ApJ 770 86",
+        flux_low_jy=0.5,
+        flux_high_jy=1.2,
+        flux_prior_low_jy=0.05,
+        flux_prior_high_jy=12.0,
+        flux_source="EHT Collaboration 2019, ApJL 875, L1 / L4",
     ),
     "SgrA*": ImageTarget(
         name="SgrA*",
@@ -90,6 +119,11 @@ EHT_TARGETS: dict[str, ImageTarget] = {
         mass_prior_low_msun=3.5e6,
         mass_prior_high_msun=5.0e6,
         mass_source="GRAVITY 2019 A&A 625 L10; Do+2019 Science 365 664",
+        flux_low_jy=2.0,
+        flux_high_jy=2.5,
+        flux_prior_low_jy=0.2,
+        flux_prior_high_jy=25.0,
+        flux_source="EHT Collaboration 2022, ApJL 930, L12",
     ),
 }
 

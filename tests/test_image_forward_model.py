@@ -155,7 +155,7 @@ class TestSampledDimension:
             VisibilityLikelihood("gr_eternal"),
         )
         assert eff == ["M", "a_star", "i", "position_angle",
-                       "ring_width_frac", "log10_brightness"]
+                       "ring_width_frac", "log10_total_flux_jy"]
         assert "D_L" not in eff
 
     def test_bh_accretion_now_builds_priors(self):

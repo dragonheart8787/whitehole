@@ -294,13 +294,32 @@ class GREternalWhiteHole(BaseModel):
                 description="Ring width as fraction of photon-ring radius",
                 latex=r"$w_r$",
             ),
+            # The amplitude is the ring's INTEGRATED flux, not its peak
+            # surface brightness.  Peak brightness used to be the sampled
+            # quantity, with the flux derived as F = I0 * G(M, a*, i, w); since
+            # G spans 2.264 dex across this prior, the measured flux of the
+            # target could not be expressed as a prior on I0, the prior's
+            # median total flux came out at 11.3 Jy against M87*'s measured
+            # 0.5-1.2 Jy, and 47.8% of prior draws landed above network SNR
+            # 1000.  Sampling the flux and inverting for I0 puts the prior on
+            # the quantity that is measured and that the short baselines
+            # constrain.  Bounds are per target and carry one decade of margin
+            # either side of the published flux; see utils.targets and audit
+            # X.16.
             ParameterSpec(
-                name="log10_brightness",
+                name="log10_total_flux_jy",
                 prior_type="uniform",
-                prior_kwargs={"low": -4.0, "high": 2.0},
-                unit="log10(Jy/μas^2)",
-                description="Log10 of peak ring surface brightness",
-                latex=r"$\log_{10} I_0$",
+                prior_kwargs={
+                    "low": float(np.log10(tgt.flux_prior_low_jy)),
+                    "high": float(np.log10(tgt.flux_prior_high_jy)),
+                },
+                unit="log10(Jy)",
+                description=(
+                    f"Log10 of the ring's integrated 230 GHz flux; {tgt.name} "
+                    f"is measured at {tgt.flux_low_jy}-{tgt.flux_high_jy} Jy "
+                    f"({tgt.flux_source})"
+                ),
+                latex=r"$\log_{10} F$",
             ),
         ]
         if self.include_charge:
@@ -383,7 +402,11 @@ class GREternalWhiteHole(BaseModel):
             "axial_ratio": float(np.abs(np.cos(i))),
             "ne": float(10.0 ** params["log10_ne"]),
             "B_Gauss": float(10.0 ** params["log10_B"]),
-            "ring_brightness": float(10.0 ** params["log10_brightness"]),
+            # The sampled amplitude is the integrated flux; the peak surface
+            # brightness is a derived quantity and needs the image grid to
+            # compute, so it is reported by
+            # VisibilityLikelihood.predictive_summary_stats rather than here.
+            "total_flux_jy": float(10.0 ** params["log10_total_flux_jy"]),
             "spin_a_star": a,
             "mass_msun": M,
             "dist_mpc": D_L,

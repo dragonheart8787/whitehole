@@ -6,9 +6,11 @@ brightness ring, sampled at (u,v) points to produce complex visibilities.
 Two emission hypotheses share the geometry and differ in how the ring is lit:
 
 ``gr_eternal``
-    A free peak surface brightness (``log10_brightness``) and a free ring
-    thickness (``ring_width_frac``), azimuthally symmetric.  The geometric
-    baseline: the ring is as bright and as thick as the data want it to be.
+    A free integrated flux (``log10_total_flux_jy``) and a free ring thickness
+    (``ring_width_frac``), azimuthally symmetric.  The geometric baseline: the
+    ring is as bright and as thick as the data want it to be.  The peak surface
+    brightness is derived, ``I0 = F / G``, not sampled -- see
+    :func:`build_ring_image` for why round that way.
 
 ``bh_accretion``
     Brightness and thickness both follow from one accretion rate
@@ -102,7 +104,11 @@ class RingEmission:
     """
 
     emission_model: str
-    brightness: float
+    #: "total_flux" -> `amplitude` is the integrated flux [Jy] and the peak
+    #: surface brightness is derived from it; "peak_brightness" -> `amplitude`
+    #: IS the peak surface brightness [Jy/muas^2] and the flux is derived.
+    normalisation: str
+    amplitude: float
     ring_width_frac: float
     asym_amp: float
     asym_azimuth_rad: float
@@ -133,19 +139,19 @@ def ring_emission_from_params(params: dict[str, float]) -> RingEmission:
     ``log10_A`` from ``bounce``'s physical ``M / D_L`` amplitude.  Carrying
     both, or neither, is an error rather than a precedence rule.
     """
-    has_ring = "log10_brightness" in params
+    has_ring = "log10_total_flux_jy" in params
     has_accretion = "log10_mdot_edd" in params
 
     if has_ring and has_accretion:
         raise KeyError(
             "Ambiguous image parameter vector: it carries both "
-            "'log10_brightness' (gr_eternal) and 'log10_mdot_edd' "
+            "'log10_total_flux_jy' (gr_eternal) and 'log10_mdot_edd' "
             "(bh_accretion). These are different emission hypotheses; supply "
             "exactly one."
         )
     if not has_ring and not has_accretion:
         raise KeyError(
-            "Image parameter vector carries neither 'log10_brightness' "
+            "Image parameter vector carries neither 'log10_total_flux_jy' "
             "(gr_eternal) nor 'log10_mdot_edd' (bh_accretion), so there is no "
             f"way to light the ring. Supplied: {sorted(params)}."
         )
@@ -153,7 +159,10 @@ def ring_emission_from_params(params: dict[str, float]) -> RingEmission:
     if has_ring:
         return RingEmission(
             emission_model="gr_eternal",
-            brightness=float(10.0 ** _require_param(params, "log10_brightness", "gr_eternal")),
+            normalisation="total_flux",
+            amplitude=float(
+                10.0 ** _require_param(params, "log10_total_flux_jy", "gr_eternal")
+            ),
             ring_width_frac=_require_param(params, "ring_width_frac", "gr_eternal"),
             asym_amp=0.0,
             asym_azimuth_rad=0.0,
@@ -164,7 +173,12 @@ def ring_emission_from_params(params: dict[str, float]) -> RingEmission:
     log10_w = LOG10_W_FRAC_EDD + W_FRAC_MDOT_INDEX * log10_mdot
     return RingEmission(
         emission_model="bh_accretion",
-        brightness=float(10.0 ** (LOG10_I0_EDD + BRIGHTNESS_MDOT_INDEX * log10_mdot)),
+        # NOT reparameterised onto total flux: log10_mdot_edd driving both the
+        # brightness AND the thickness is the substance of this hypothesis, and
+        # normalising the flux away would delete the coupling that makes it
+        # different from gr_eternal.  See audit X.16.4.
+        normalisation="peak_brightness",
+        amplitude=float(10.0 ** (LOG10_I0_EDD + BRIGHTNESS_MDOT_INDEX * log10_mdot)),
         ring_width_frac=float(np.clip(10.0**log10_w, W_FRAC_MIN, W_FRAC_MAX)),
         asym_amp=float(JET_CONTRAST_MAX * jet_frac),
         # Zero in the ring's own (position-angle-rotated) frame, i.e. the
@@ -307,6 +321,126 @@ def _compute_visibilities(
     return np.einsum("mx,yx,my->m", phase_x, image, phase_y) * dx_muas**2
 
 
+class UnrepresentableRingError(ValueError):
+    """The image grid cannot represent this ring at all.
+
+    Raised when the ring integrates to zero flux at unit brightness, so there
+    is no peak brightness that puts the sampled total flux on it.  In practice
+    this is the near-edge-on corner: ``axial_ratio = |cos i|`` collapses the
+    annulus towards a line, and a thin ring there becomes a sub-pixel needle
+    that falls between grid points.
+
+    ``VisibilityLikelihood`` turns this into ``-inf`` rather than letting it
+    abort a sampling run -- which is also what the previous parameterisation
+    did numerically, since those geometries imaged to ~zero flux and scored an
+    arbitrarily bad likelihood.  It is a forward-model limitation, NOT a
+    consequence of sampling the flux; see audit X.16.5.
+    """
+
+
+@dataclass(frozen=True)
+class RingImage:
+    """A built ring image plus everything derived on the way to it."""
+
+    image: NDArray
+    brightness: float              # peak surface brightness actually used [Jy/μas^2]
+    total_flux_jy: float           # integrated flux of `image`
+    geometry_factor_muas2: float   # G: the flux this geometry gives at I0 = 1
+    r_ring_muas: float
+    w_ring_muas: float
+    axial_ratio: float
+    emission: RingEmission
+
+
+def build_ring_image(params: dict[str, float], context: dict[str, Any]) -> RingImage:
+    """Build the source image for a parameter vector.
+
+    The single place the image is constructed, so the simulator, the likelihood
+    and the predictive summary statistics cannot drift apart.
+
+    **Why the flux, not the brightness, is the sampled quantity for
+    gr_eternal.**  The image's integrated flux is ``F = I0 * G``, where the
+    geometry factor ``G`` is the flux the same ring would carry at unit peak
+    brightness.  ``G`` depends on ``M``, ``a_star``, ``i`` and
+    ``ring_width_frac``, and across this model's prior it spans 2.264 dex
+    (5-95%).  Putting the prior on ``I0`` therefore meant that "this source
+    emits about 1 Jy" -- the one thing actually known about M87* and Sgr A* --
+    could not be stated as a prior at all: the geometry leaked into the flux
+    and half the prior mass landed at network SNR above 1000, which is not a
+    regime EHT data occupies.  Sampling ``log10_total_flux_jy`` and inverting
+    ``I0 = F / G`` puts the prior on the quantity that is measured and that the
+    short baselines constrain, and leaves ``I0`` as the derived quantity.
+    Same move as the burst-timing reparameterisation in
+    docs/BOUNCE_PREFLIGHT_AUDIT.md B3-2.  See audit X.16.
+
+    ``G`` is evaluated numerically on the image grid rather than from the
+    analytic annulus integral, so the normalisation absorbs pixelisation and
+    the imaged flux equals the sampled flux exactly, not just to within the
+    discretisation error.
+    """
+    fov_muas = float(context.get("fov_muas", 200.0))
+    n_pix = int(context.get("n_pixels", 128))
+    target = require_target(context)
+
+    M = _require_param(params, "M", "image")
+    a = _require_param(params, "a_star", "image")
+    i = _require_param(params, "i", "image")
+    pos_angle = _require_param(params, "position_angle", "image")
+    emission = ring_emission_from_params(params)
+
+    r_ring = _shadow_radius_muas(M, a, target.distance_mpc, inclination_rad=i)
+    w_ring = r_ring * emission.ring_width_frac
+    axial_ratio = float(np.abs(np.cos(i)))
+    pixel_area = (2.0 * fov_muas / n_pix) ** 2
+
+    unit_image = _gaussian_ring_image(
+        fov_muas,
+        n_pix,
+        r_ring,
+        w_ring,
+        1.0,
+        axial_ratio,
+        pos_angle,
+        asym_amp=emission.asym_amp,
+        asym_azimuth_rad=emission.asym_azimuth_rad,
+    )
+    geometry_factor = float(unit_image.sum() * pixel_area)
+
+    if emission.normalisation == "total_flux":
+        if not np.isfinite(geometry_factor) or geometry_factor <= 0.0:
+            # The grid cannot represent this ring at all, so there is no
+            # brightness that puts the requested flux on it.  Fail closed
+            # rather than divide by ~0 and emit an image whose flux is right
+            # only because it was forced into one or two stray pixels.
+            raise UnrepresentableRingError(
+                "Cannot normalise the ring to its sampled total flux: this "
+                f"geometry images to {geometry_factor!r} μas^2 at unit "
+                f"brightness (r_ring={r_ring:.4g} μas, w_ring={w_ring:.4g} μas, "
+                f"axial_ratio={axial_ratio:.4g} on a {n_pix}px/{fov_muas}μas "
+                "grid), i.e. it falls between pixels."
+            )
+        brightness = emission.amplitude / geometry_factor
+    elif emission.normalisation == "peak_brightness":
+        brightness = emission.amplitude
+    else:  # pragma: no cover - guarded by ring_emission_from_params
+        raise ValueError(
+            f"Unknown ring normalisation {emission.normalisation!r}; "
+            "expected 'total_flux' or 'peak_brightness'."
+        )
+
+    image = unit_image * brightness
+    return RingImage(
+        image=image,
+        brightness=float(brightness),
+        total_flux_jy=float(image.sum() * pixel_area),
+        geometry_factor_muas2=geometry_factor,
+        r_ring_muas=r_ring,
+        w_ring_muas=w_ring,
+        axial_ratio=axial_ratio,
+        emission=emission,
+    )
+
+
 class ImageShadowSimulator(BaseSimulator):
     """Toy image/shadow forward simulator for EHT-like VLBI observations.
 
@@ -343,28 +477,12 @@ class ImageShadowSimulator(BaseSimulator):
         target = require_target(context)
         D_L = target.distance_mpc
 
-        M = _require_param(params, "M", "image")
-        a = _require_param(params, "a_star", "image")
-        i = _require_param(params, "i", "image")
-        pos_angle = _require_param(params, "position_angle", "image")
-        emission = ring_emission_from_params(params)
-
-        r_ring = _shadow_radius_muas(M, a, D_L, inclination_rad=i)
-        w_ring = r_ring * emission.ring_width_frac
-        axial_ratio = float(np.abs(np.cos(i)))
-
         # ── Build image ────────────────────────────────────────────────────────
-        image = _gaussian_ring_image(
-            fov_muas,
-            n_pix,
-            r_ring,
-            w_ring,
-            emission.brightness,
-            axial_ratio,
-            pos_angle,
-            asym_amp=emission.asym_amp,
-            asym_azimuth_rad=emission.asym_azimuth_rad,
-        )
+        built = build_ring_image(params, context)
+        image = built.image
+        emission = built.emission
+        r_ring = built.r_ring_muas
+        w_ring = built.w_ring_muas
 
         # ── Sample visibilities ────────────────────────────────────────────────
         vis_signal = _compute_visibilities(image, fov_muas, uv_coverage, freq_ghz)
@@ -397,8 +515,11 @@ class ImageShadowSimulator(BaseSimulator):
                 "target": target.name,
                 "D_L_mpc": D_L,
                 "emission_model": emission.emission_model,
+                "normalisation": emission.normalisation,
+                "total_flux_jy": built.total_flux_jy,
+                "geometry_factor_muas2": built.geometry_factor_muas2,
                 "ring_width_frac": emission.ring_width_frac,
-                "brightness_jy_per_muas2": emission.brightness,
+                "brightness_jy_per_muas2": built.brightness,
                 "asym_amp": emission.asym_amp,
             },
             params_true=params,

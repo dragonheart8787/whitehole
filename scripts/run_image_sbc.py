@@ -23,6 +23,7 @@ from whitesearch.inference.bilby_runner import SamplingBudgetExceeded
 from whitesearch.likelihoods import VisibilityLikelihood
 from whitesearch.models import model_for_context
 from whitesearch.simulators import get_simulator
+from whitesearch.simulators.image_shadow import UnrepresentableRingError
 from whitesearch.utils.math_utils import compute_credible_interval, compute_sbc_rank
 
 L = 100                      # rank denominator: thinned posterior draws
@@ -30,9 +31,9 @@ CI_LEVELS = (0.68, 0.90)
 
 
 def _override_brightness_prior(model, lo: float, hi: float):
-    """Return `model` with log10_brightness re-bounded to [lo, hi].
+    """Return `model` with its amplitude parameter re-bounded to [lo, hi].
 
-    EXPERIMENTAL OVERRIDE, used only to measure what a narrower brightness
+    EXPERIMENTAL OVERRIDE, used only to measure what a different amplitude
     prior would cost.  It patches the ParameterSpec that both ``sample_prior``
     and ``to_bilby_priors`` read, so the injection and the fit see the same
     prior.  It does NOT change the shipped model.
@@ -44,7 +45,7 @@ def _override_brightness_prior(model, lo: float, hi: float):
     def patched():
         out = []
         for spec in original():
-            if spec.name == "log10_brightness":
+            if spec.name == "log10_total_flux_jy":
                 spec = replace(spec, prior_kwargs={"low": lo, "high": hi})
             out.append(spec)
         return out
@@ -73,7 +74,18 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
 
     rng = np.random.default_rng(seed)
     theta = model.sample_prior(rng)
-    data = sim.simulate(theta, ctx, rng=np.random.default_rng(seed + 1))
+    try:
+        data = sim.simulate(theta, ctx, rng=np.random.default_rng(seed + 1))
+    except UnrepresentableRingError as exc:
+        # The grid cannot represent this draw's ring (near-edge-on + thin).
+        # Recorded as its own status rather than counted as a failure, so the
+        # campaign's denominator stays honest.
+        rec = {"idx": idx, "target": target, "seed": seed, "nlive": nlive,
+               "status": "unrepresentable", "reason": str(exc), "wall_s": 0.0,
+               "theta_true": {k: float(v) for k, v in theta.items()}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(rec, indent=1))
+        return rec
 
     runner = BilbyRunner(
         sampler="dynesty",
@@ -154,7 +166,7 @@ def main() -> None:
                     help="stop launching new injections after this many seconds")
     ap.add_argument("--checkpoint-dt", dest="checkpoint_dt", type=float, default=45.0)
     ap.add_argument("--brightness-prior", dest="brightness_prior", default=None,
-                    help="EXPERIMENTAL 'lo,hi' override of log10_brightness bounds")
+                    help="EXPERIMENTAL 'lo,hi' override of log10_total_flux_jy bounds")
     ap.add_argument("--outroot", default="artifacts/image_sbc")
     a = ap.parse_args()
 

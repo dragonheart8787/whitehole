@@ -75,16 +75,28 @@ ACCRETION_TRUTH = {
 #: A gr_eternal vector whose ring has the SAME radius, thickness and peak
 #: brightness as ACCRETION_TRUTH, so any difference between the two is the
 #: azimuthal structure rather than a mismatch of scale.
-MATCHED_RING_TRUTH = {
-    "M": 6.5e9,
-    "a_star": 0.5,
-    "i": 0.9,
-    "position_angle": 0.7,
-    "ring_width_frac": ring_emission_from_params(ACCRETION_TRUTH).ring_width_frac,
-    "log10_brightness": float(
-        np.log10(ring_emission_from_params(ACCRETION_TRUTH).brightness)
-    ),
-}
+def _matched_ring_truth() -> dict[str, float]:
+    """gr_eternal parameters giving the SAME ring as ACCRETION_TRUTH.
+
+    Matched on radius, thickness and total flux.  gr_eternal now samples the
+    integrated flux, so the match is made there: build the accretion image,
+    read its flux, and hand that to gr_eternal.  Any remaining difference
+    between the two images is the jet footpoint, not a difference of scale.
+    """
+    accretion = ImageShadowSimulator().simulate(
+        ACCRETION_TRUTH, CTX, rng=np.random.default_rng(0)
+    )
+    return {
+        "M": 6.5e9,
+        "a_star": 0.5,
+        "i": 0.9,
+        "position_angle": 0.7,
+        "ring_width_frac": ring_emission_from_params(ACCRETION_TRUTH).ring_width_frac,
+        "log10_total_flux_jy": float(np.log10(accretion.metadata["total_flux_jy"])),
+    }
+
+
+MATCHED_RING_TRUTH = _matched_ring_truth()
 
 
 def _sim(params, ctx=CTX, seed=0):
@@ -303,7 +315,8 @@ class TestAccretionEmissionLaw:
         """The substance of the hypothesis: they are not independent."""
         lo = ring_emission_from_params({**ACCRETION_TRUTH, "log10_mdot_edd": -5.0})
         hi = ring_emission_from_params({**ACCRETION_TRUTH, "log10_mdot_edd": 0.0})
-        assert hi.brightness > lo.brightness
+        assert lo.normalisation == hi.normalisation == "peak_brightness"
+        assert hi.amplitude > lo.amplitude
         # A radiatively inefficient flow is thick; approaching Eddington it thins.
         assert hi.ring_width_frac < lo.ring_width_frac
         assert lo.ring_width_frac == pytest.approx(0.397, abs=0.005)
@@ -323,11 +336,13 @@ class TestAccretionEmissionLaw:
         assert full.asym_amp == pytest.approx(3.0)
 
     def test_gr_eternal_keeps_an_axisymmetric_ring(self):
-        assert ring_emission_from_params(MATCHED_RING_TRUTH).asym_amp == 0.0
+        emission = ring_emission_from_params(MATCHED_RING_TRUTH)
+        assert emission.asym_amp == 0.0
+        assert emission.normalisation == "total_flux"
 
     def test_a_vector_carrying_both_hypotheses_raises(self):
         with pytest.raises(KeyError, match="Ambiguous"):
-            ring_emission_from_params({**ACCRETION_TRUTH, "log10_brightness": 0.0})
+            ring_emission_from_params({**ACCRETION_TRUTH, "log10_total_flux_jy": 0.0})
 
     def test_a_vector_carrying_neither_raises(self):
         with pytest.raises(KeyError, match="neither"):
@@ -356,6 +371,7 @@ class TestSimulatorAndLikelihoodShareTheFormula:
         assert stats["brightness"] == pytest.approx(
             data.metadata["brightness_jy_per_muas2"]
         )
+        assert stats["total_flux_jy"] == pytest.approx(data.metadata["total_flux_jy"])
         assert stats["theta_d_muas"] == pytest.approx(
             2.0 * data.metadata["r_ring_muas"]
         )
@@ -370,6 +386,8 @@ class TestSimulatorAndLikelihoodShareTheFormula:
         model = get_model("bh_accretion", target="M87*")
         stats = model.summary_stats(ACCRETION_TRUTH)
         data = _sim(ACCRETION_TRUTH)
+        # bh_accretion still samples a peak brightness, so its summary stat and
+        # the simulator's brightness agree directly.
         assert stats["ring_brightness"] == pytest.approx(
             data.metadata["brightness_jy_per_muas2"]
         )
@@ -469,14 +487,26 @@ class TestAccretionIsNotGREternalRelabelled:
     """I-1's closing check, with the magnitude reported."""
 
     def test_the_images_differ_at_matched_ring_geometry(self):
-        """Same radius, thickness and peak brightness -- only the jet differs."""
-        ring = _sim(MATCHED_RING_TRUTH).metadata["image"]
-        accretion = _sim(ACCRETION_TRUTH).metadata["image"]
-        assert _sim(MATCHED_RING_TRUTH).metadata["w_ring_muas"] == pytest.approx(
-            _sim(ACCRETION_TRUTH).metadata["w_ring_muas"]
+        """Same radius, thickness AND total flux -- only the jet differs.
+
+        This became a stricter comparison when gr_eternal started sampling the
+        integrated flux: the two images now carry identical flux, so the
+        difference is purely how that flux is distributed in azimuth.  Matching
+        on peak brightness instead (the old parameterisation) let the accretion
+        image carry ~2x the flux, which inflated the difference to 89.8%.
+        """
+        ring_data, accretion_data = _sim(MATCHED_RING_TRUTH), _sim(ACCRETION_TRUTH)
+        assert ring_data.metadata["w_ring_muas"] == pytest.approx(
+            accretion_data.metadata["w_ring_muas"]
         )
-        rel = np.abs(accretion - ring).max() / ring.max()
-        assert rel == pytest.approx(0.898, abs=0.02), "measured 89.8%"
+        assert ring_data.metadata["total_flux_jy"] == pytest.approx(
+            accretion_data.metadata["total_flux_jy"]
+        )
+        rel = (
+            np.abs(accretion_data.metadata["image"] - ring_data.metadata["image"]).max()
+            / ring_data.metadata["image"].max()
+        )
+        assert rel == pytest.approx(0.500, abs=0.02), "measured 50.0%"
 
     def test_only_the_accretion_image_is_azimuthally_asymmetric(self):
         """Compare each image with itself rotated by 180 degrees."""
@@ -495,13 +525,17 @@ class TestAccretionIsNotGREternalRelabelled:
         ll_ring = VisibilityLikelihood("gr_eternal").loglike(
             MATCHED_RING_TRUTH, data, CTX
         )
+        # Flux-matched, so this separation is the azimuthal structure alone and
+        # not a brightness mismatch; it was > 1e5 when the two carried
+        # different fluxes.  ln BF = 17.8 is still far past this project's
+        # ln BF > 5 publication gate.
         assert ll_accretion > ll_ring
-        assert ll_accretion - ll_ring > 100.0
+        assert ll_accretion - ll_ring > 10.0
 
     def test_the_two_models_do_not_share_a_parameter_vector(self):
         ring = VisibilityLikelihood("gr_eternal").parameter_names
         accretion = VisibilityLikelihood("bh_accretion").parameter_names
         assert ring != accretion
         assert set(ring) & set(accretion) == {"M", "a_star", "i", "position_angle"}
-        assert set(ring) - set(accretion) == {"ring_width_frac", "log10_brightness"}
+        assert set(ring) - set(accretion) == {"ring_width_frac", "log10_total_flux_jy"}
         assert set(accretion) - set(ring) == {"log10_mdot_edd", "jet_power_frac"}
