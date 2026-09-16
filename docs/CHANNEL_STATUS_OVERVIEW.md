@@ -21,7 +21,7 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.14） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.15） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -119,7 +119,8 @@ SBC/coverage campaign 的通道。
 
 | 項目 | 分類 |
 |---|---|
-| **SBC 跑不完**：先驗預測 SNR 橫跨 0.2–3.2e5，巢狀取樣成本隨資訊量爆炸。實測單筆 SNR 158 要 3292 s / 1.3e6 次 likelihood 呼叫；N=100 估計約 145 小時 | **阻塞性，已回報未修**（見待決策 I-6） |
+| **SBC 跑不完**：先驗預測 SNR 橫跨 0.2–3.2e5，巢狀取樣成本隨資訊量爆炸。實測單筆 SNR 158 要 3292 s / 1.3e6 次 likelihood 呼叫；N=100 估計約 145 小時。**收窄亮度先驗到物理量級後中位仍約 37 分/筆（N=100 約 62 小時），不足以解決** | **阻塞性，已回報未修**（見待決策 I-6） |
+| `log10_brightness` 先驗預測的中位總流量 **11.3 Jy**，比 M87\* 實測 0.5–1.2 Jy 高約一個數量級；47.8% 的先驗質量在 SNR > 10³ | **已評估、未定案**（同 I-6） |
 | `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
 | **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」；第一次嘗試已執行但未完成（I-6） | 待執行 |
 | 影像網格對薄環的響應**非單調**（3 px 0.1217、4 px 0.0003、5 px 0.9749），是取樣假影；現行網格下兩個目標都遠在下界之上，實務上不觸發 | **已定性但選擇不修** |
@@ -271,34 +272,69 @@ SBC/coverage campaign 的通道。
   （`closure % 2π − π` 把零閉合映到 −π）。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.4。
 
-### I-6｜image｜SBC 的取樣成本 —— **第一次 campaign 未能完成**
+### I-6｜image｜SBC 的取樣成本 —— **第一次 campaign 未完成；亮度先驗已評估，未定案**
 
-- **做了什麼**：`gr_eternal`、M87\*、6 維、`use_closure_phases=False`
-  （amplitude-only，明確聲明，因 I-5 未修）、dynesty `bound='live'` /
-  `sample='rwalk'` / `nact=2` / `nlive=250` / L=100。
-  `nact` 生效已用行為驗證（bilby 印 "An average of 4 steps will be accepted"，
-  且完成的 result JSON 內 `sampler_kwargs` 含 `nact: 2`）。
-- **順帶修好**：bilby 的 `check_point_delta_t` 預設 600 s 比一個 shard 還長，
-  所以從來沒寫出過 resume 檔；改為 45 s 之後 resume 實測生效。
-- **量到的成本**：唯一走完全程的中等注入（SNR 158）要
-  **3292 s / 4574 次迭代 / 約 1.3e6 次 likelihood 呼叫**，且明顯減速
-  （`nc` 54 → 1081，效率 3.9% → 0.4%）。SNR ≳ 1500 的注入全部逾時。
-  likelihood 本身只要 1.755 ms/呼叫，**瓶頸是呼叫次數不是單次成本**。
-- **原因**：`log10_brightness` 是 6 dex 的自由振幅，先驗預測 SNR 橫跨
-  0.2–3.2e5；NS 迭代數 ≈ `nlive × H`，而 H 隨 ln(SNR) 成長。
-  N=100 的期望總成本約 **145 小時**，尾部很重。
-- **為什麼沒有「設上限、用跑完的筆數回報」**：收斂與否幾乎完全由 SNR 決定，
-  任何時間上限都只會留下最安靜的注入——那些注入的後驗幾乎就是先驗，
-  rank 自然均勻。那會產生一份**看起來校準良好但純屬選擇效應**的報告。
-  因此本輪**不回報任何 rank / KS p 值 / coverage 數字**。
-- **要決定的**：如何讓這條通道的 SBC 成本可負擔。可能的方向（未執行、
-  未替任何一個背書）：縮小 `log10_brightness` 先驗或改為以總流量參數化、
-  降低 `nlive`、換 `bound`/`sample` 策略、或接受在別的機器上長跑。
-  **這些都會改動先驗或取樣設定，屬於設計決定，不是機械修正。**
+**第一次 campaign（X.14）**
+
+- `gr_eternal`、M87\*、6 維、`use_closure_phases=False`、`nlive=250`、
+  `nact=2`（行為已驗證：bilby 印 "An average of 4 steps will be accepted"，
+  且 result JSON 的 `sampler_kwargs` 含 `nact: 2`）。
+- 順帶修好 checkpoint/resume：bilby 的 `check_point_delta_t` 預設 600 s 比一個
+  shard 還長，**從來沒寫出過 resume 檔**；改 45 s 後實測生效。
+- 實測：SNR 158 的注入要 **3292 s / 4574 迭代 / 約 1.3e6 次 likelihood 呼叫**，
+  且 `nc` 從 54 成長到 1081、效率 3.9% → 0.4%。SNR ≳ 1500 的全部逾時。
+- **沒有回報任何 rank / KS p 值 / coverage**：收斂與否幾乎完全由 SNR 決定，
+  任何時間上限都只會留下最安靜的注入（後驗≈先驗、rank 自然均勻），
+  會產生一份純屬選擇效應的「校準良好」報告。
+
+**亮度先驗合理性評估（X.15）**
+
+- **先驗確實與物理脫節，收窄有獨立理由**：現行 `log10_brightness ~
+  Uniform(-4, 2)`（6 dex）的先驗預測中位總流量是 **11.3 Jy**，而 M87\* 實測
+  0.5–1.2 Jy（EHT 2019 ApJL 875 L1/L4）、Sgr A\* 2.0–2.5 Jy（EHT 2022 ApJL
+  930 L12）——中位高約一個數量級，且 **47.8% 的先驗質量落在網路 SNR > 1000**。
+- **建議範圍**：以中位幾何因子 G = 120.5 μas² 反推，涵蓋兩個目標
+  （0.5–2.5 Jy）需 `[-2.38, -1.68]`（0.70 dex）；留 ±1 dex 餘裕則是
+  **`[-3.38, -0.68]`（2.70 dex）**，中位總流量 1.28 Jy。
+- **但殘留跨度仍 > 2–3 dex，回報 tension**：`log10_brightness` 是**峰值面亮度**，
+  總流量是導出量 `F = I0 × G(M, a*, i, w)`，而 **G 本身就跨 2.264 dex（5–95%）**。
+  即使亮度先驗收成 delta function，流量／SNR 仍散布 2.26 dex。
+- **pilot 實測（N=4，執行期覆寫，未動 shipped 先驗）**：
+  SNR 9.7 → 380 s 收斂；SNR 35.6 → 1006 s 收斂；SNR 173 與 274 在 730 s 內
+  **仍未收斂**。四個收斂點在 ln(SNR) 上斜率約 1044 s/nat，內插到收窄後的
+  中位 SNR ≈ 80 得 **約 37 分/筆**，N=100 約 62 小時。
+  **未達「單筆十分鐘內」門檻，因此未開完整規模 campaign。**
+- **依指示先回報、未自行定案收窄數字，未修改任何 production 先驗。**
+
+**除了先驗寬度之外觀察到的因素（均未動手）**
+
+1. **資訊量由幾何主導**：idx 0 的 H ≈ 18.3 nats 粗分解為 `position_angle` 4.5、
+   `M` 2.6、`log10_brightness` 2.2、`i` 1.8、`ring_width_frac` 0.8、`a_star` 0.45。
+   亮度先驗 6 dex → 2.7 dex 只移除約 0.8 nat（4%）；收窄真正的作用是砍掉
+   高 SNR 長尾，不是降低中位成本。
+2. **參數化本身**（與 GW B3-2 同類）：物理上知道的量與資料約束最緊的量
+   都是**總流量**，但先驗放在峰值面亮度上，所以幾何會漏進流量，
+   而且「這個源約 1 Jy」無法寫成 I0 的先驗。改以 `log10_total_flux_jy`
+   參數化、I0 設為導出量，看起來是對症的方向——**但那是設計決定。**
+3. **取樣器在後驗收緊時退化**：`nc` 50 → >1000，`bound='live'` +
+   `sample='rwalk'` 的策略問題，與先驗無關。
+4. **likelihood 1.755 ms/呼叫**，其中 1.126 ms 在 `_compute_visibilities` 的
+   `c_einsum`（不走 BLAS），改矩陣乘法估計可省 2–3 倍，結果不變。
+5. **`axial_ratio = |cos i|` 在 `i → π/2` 讓環退化**成次像素針狀物，
+   是流量分布那條 18.66 dex 長尾的來源（600 筆中 1 筆）。
+
+**對 `bh_accretion` 無影響**：兩者亮度相關先驗各自獨立定義
+（`gr_eternal.log10_brightness` 在 `models/gr_eternal.py`；
+`bh_accretion.log10_mdot_edd` 在 `models/alternatives.py`），只共用
+`ring_emission_from_params()` 這個求值函式。已實測驗證重新設界不互相影響。
+
+- **要決定的**：(a) 是否採用 `[-3.38, -0.68]`（或另一個餘裕）收窄先驗；
+  (b) 是否改以總流量參數化；(c) 是否處理上列第 3–5 項。
 - **分類**：**需要你做一個設計決定**。
-- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.14。
-  可續跑的 harness 在 `scripts/run_image_sbc.py`，
-  原始數字在 `docs/calibration/image_gr_eternal_sbc_cost_probe.csv`。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.14、X.15。
+  原始數字：`docs/calibration/image_gr_eternal_sbc_cost_probe.csv`、
+  `image_gr_eternal_brightness_prior_options.csv`、
+  `image_gr_eternal_prior_narrowing_pilot.csv`。
 
 ### X-1｜xray｜整條通道要不要投入實作
 

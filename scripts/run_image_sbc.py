@@ -29,8 +29,33 @@ L = 100                      # rank denominator: thinned posterior draws
 CI_LEVELS = (0.68, 0.90)
 
 
+def _override_brightness_prior(model, lo: float, hi: float):
+    """Return `model` with log10_brightness re-bounded to [lo, hi].
+
+    EXPERIMENTAL OVERRIDE, used only to measure what a narrower brightness
+    prior would cost.  It patches the ParameterSpec that both ``sample_prior``
+    and ``to_bilby_priors`` read, so the injection and the fit see the same
+    prior.  It does NOT change the shipped model.
+    """
+    from dataclasses import replace
+
+    original = model.parameters
+
+    def patched():
+        out = []
+        for spec in original():
+            if spec.name == "log10_brightness":
+                spec = replace(spec, prior_kwargs={"low": lo, "high": hi})
+            out.append(spec)
+        return out
+
+    model.parameters = patched
+    return model
+
+
 def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
-            checkpoint_dt: float = 45.0) -> dict:
+            checkpoint_dt: float = 45.0,
+            brightness_prior: tuple[float, float] | None = None) -> dict:
     path = outdir / f"inj_{idx:04d}.json"
     if path.exists():
         return json.loads(path.read_text())
@@ -38,6 +63,8 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     seed = 700_000 + idx
     ctx = {**_default_context("image"), "target": target, "rng_seed": seed}
     model = model_for_context("gr_eternal", ctx)
+    if brightness_prior is not None:
+        model = _override_brightness_prior(model, *brightness_prior)
     # amplitude-only, declared explicitly: the closure-phase triplets in
     # _default_eht_uv() do not close (audit X.13.4 / decision I-5), so this
     # campaign must not claim to use closure phases.
@@ -73,6 +100,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         ),
         "network_snr": float(np.sqrt(((sig / ctx["thermal_noise_jy"]) ** 2).sum())),
         "use_closure_phases": False,
+        "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
     }
 
     t0 = time.monotonic()
@@ -125,9 +153,14 @@ def main() -> None:
     ap.add_argument("--budget", type=float, default=520.0,
                     help="stop launching new injections after this many seconds")
     ap.add_argument("--checkpoint-dt", dest="checkpoint_dt", type=float, default=45.0)
+    ap.add_argument("--brightness-prior", dest="brightness_prior", default=None,
+                    help="EXPERIMENTAL 'lo,hi' override of log10_brightness bounds")
     ap.add_argument("--outroot", default="artifacts/image_sbc")
     a = ap.parse_args()
 
+    bp = None
+    if a.brightness_prior:
+        bp = tuple(float(x) for x in a.brightness_prior.split(","))
     outdir = Path(a.outroot) / a.target.replace("*", "star")
     outdir.mkdir(parents=True, exist_ok=True)
     t_start = time.monotonic()
@@ -136,7 +169,7 @@ def main() -> None:
         if time.monotonic() - t_start > a.budget:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
-        r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt)
+        r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt, bp)
         done += 1
         print(
             f"[{i:04d}] {r['status']:8s} {r['wall_s']:7.1f}s "
