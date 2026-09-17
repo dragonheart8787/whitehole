@@ -164,7 +164,19 @@ class VisibilityLikelihood(BaseLikelihood):
 
         sim = ImageShadowSimulator()
         sim_data = sim.simulate(theta, model_context, rng=np.random.default_rng(0))
-        model_vis = np.asarray(sim_data.data, dtype=complex)
+        # The MODEL TEMPLATE is the noise-free prediction, `vis_signal` -- not
+        # `sim_data.data`, which is `vis_signal + noise` and therefore an
+        # *observation*, not a prediction.  Using `.data` gave every template a
+        # fixed thermal-noise realisation (the rng seed below is constant), so
+        # the likelihood compared measured-with-noise against
+        # predicted-with-different-noise.  Because |V| is a positively biased
+        # function of added noise, it also inflated the template amplitude and
+        # pulled the recovered flux down.  Measured at typical SNR: +0.27%
+        # inflation before, 0% after.  See audit X.19.
+        #
+        # The rng is still passed, and still fixed, so the discarded noise draw
+        # cannot make the likelihood stochastic between evaluations.
+        model_vis = np.asarray(sim_data.metadata["vis_signal"], dtype=complex)
 
         n = min(len(obs_vis), len(model_vis))
         obs_vis = obs_vis[:n]
@@ -195,7 +207,10 @@ class VisibilityLikelihood(BaseLikelihood):
             }
         else:
             obs_closure = meta.get("closure_phases", None)
-            model_closure = sim_data.metadata.get("closure_phases", None)
+            # Same correction: the model's closure phases must come from the
+            # noise-free prediction.  `closure_phases` in the metadata is the
+            # observation-side quantity, computed from the noisy visibilities.
+            model_closure = sim_data.metadata.get("closure_phases_signal", None)
             if obs_closure is None:
                 raise KeyError(
                     "VisibilityLikelihood was constructed with "
@@ -207,8 +222,9 @@ class VisibilityLikelihood(BaseLikelihood):
                 )
             if model_closure is None:  # pragma: no cover - simulator always sets it
                 raise KeyError(
-                    "ImageShadowSimulator produced no 'closure_phases' for the "
-                    "model visibilities; cannot form the closure-phase term."
+                    "ImageShadowSimulator produced no 'closure_phases_signal' "
+                    "for the model visibilities; cannot form the closure-phase "
+                    "term."
                 )
             obs_cp = np.asarray(obs_closure, dtype=float)
             mod_cp = np.asarray(model_closure, dtype=float)

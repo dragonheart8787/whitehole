@@ -494,7 +494,15 @@ class ImageShadowSimulator(BaseSimulator):
         visibilities = vis_signal + noise
 
         # ── Closure quantities (first triangle) ────────────────────────────────
+        # Two versions, for the two sides of the likelihood.  `closure_phases`
+        # comes from the NOISY visibilities, because that is what an observation
+        # measures.  `closure_phases_signal` comes from the noise-free
+        # prediction, which is what a model template must be: a likelihood
+        # compares measured-with-noise against predicted-without.  Emitting only
+        # the noisy one is what let VisibilityLikelihood use a noise-realised
+        # template by accident -- see audit X.19.
         closure_phases = _compute_closure_phases(visibilities)
+        closure_phases_signal = _compute_closure_phases(vis_signal)
 
         return SimData(
             channel="image",
@@ -509,7 +517,10 @@ class ImageShadowSimulator(BaseSimulator):
                 "w_ring_muas": w_ring,
                 "thermal_noise_jy": thermal_noise_jy,
                 "closure_phases": closure_phases,
+                # Noise-free counterparts of `data` / `closure_phases`: the
+                # model prediction, which is what a likelihood template needs.
                 "vis_signal": vis_signal,
+                "closure_phases_signal": closure_phases_signal,
                 # Provenance: which target's distance was used, and which
                 # emission hypothesis lit the ring.
                 "target": target.name,

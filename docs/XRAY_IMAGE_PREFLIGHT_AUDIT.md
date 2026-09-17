@@ -1805,3 +1805,133 @@ mis-specification 同時影響資料側與模型側，方向不容易單憑推�
 
 94 筆的 rank 與 CI 都存在 `artifacts/image_sbc_n20/`，
 修正之後重跑可以直接對照。
+
+---
+
+# X.19 `VisibilityLikelihood` 模型樣板誤用觀測雜訊資料修正
+
+> X.18.5(a) 的修正。只處理這一項——**沒有動 `nact` 或任何取樣器設定
+> （那是 (b)），也沒有動 likelihood 的機率模型形式（那是 (c)）**。
+> 不含任何科學結論。
+
+## X.19.1 問題：`data` 是觀測，不是預測
+
+`SimData` 的契約（`simulators/base.py`）：
+
+| 欄位 | 內容 |
+|---|---|
+| `data` | 主要資料陣列 |
+| `metadata` | 輔助資訊 |
+| `noise_realisation` | 加到訊號上的雜訊 |
+
+在 `ImageShadowSimulator.simulate()` 裡：
+
+```python
+vis_signal   = _compute_visibilities(image, ...)      # 無雜訊的模型預測
+noise        = (rng.standard_normal(...) + 1j * ...) * thermal_noise_jy
+visibilities = vis_signal + noise                     # -> SimData.data
+```
+
+所以 **`SimData.data` 是「觀測」（訊號 + 雜訊），`metadata["vis_signal"]`
+才是「模型預測」**。likelihood 需要的是後者：`p(d | θ)` 裡的模型項是
+`signal(θ)`，雜訊只該透過 `σ` 進入。
+
+`VisibilityLikelihood.loglike()` 原本寫的是：
+
+```python
+sim_data = sim.simulate(theta, model_context, rng=np.random.default_rng(0))
+model_vis = np.asarray(sim_data.data, dtype=complex)        # <- 觀測,不是預測
+```
+
+於是每個模型樣板都帶著一組固定（seed 0）的熱雜訊實現，
+σ = 0.05 Jy/baseline。likelihood 變成拿「量到的含雜訊」去比對
+「預測的含另一組雜訊」。
+
+**closure phase 那一項有完全相同的缺陷**：
+`sim_data.metadata["closure_phases"]` 是從**含雜訊**的可見度算出來的
+（觀測側的量），模型側卻也用了它。
+
+## X.19.2 修正
+
+`simulators/image_shadow.py` 現在同時輸出兩個版本，語意寫清楚：
+
+| metadata 鍵 | 來源 | 用途 |
+|---|---|---|
+| `closure_phases` | 含雜訊的 `visibilities` | 觀測側 |
+| `closure_phases_signal` | 無雜訊的 `vis_signal` | 模型樣板 |
+
+`likelihoods/visibility.py` 改為：
+
+```python
+model_vis     = sim_data.metadata["vis_signal"]              # 振幅項
+model_closure = sim_data.metadata["closure_phases_signal"]   # 相位項
+```
+
+`rng` 仍然傳入且仍然固定，所以被丟棄的那次雜訊抽樣不會讓 likelihood
+在兩次評估之間變成隨機的。
+
+## X.19.3 驗證：樣板不再被雜訊抬高
+
+以 X.18.5 診斷時完全相同的方法，在**已存檔的 94 筆真值**上量測模型樣板
+`|V|` 相對無雜訊預測被抬高的百分比：
+
+| | 修正前（用 `sim_data.data`） | 修正後（用 `vis_signal`） |
+|---|---|---|
+| 中位數 | **+0.510%** | **0%**（依構造精確為零） |
+| 平均 | +10.67% | 0% |
+| 95 百分位 | +59.98% | 0% |
+| 暗的一半（中位數） | **+13.012%** | 0% |
+| 亮的一半（中位數） | +0.111% | 0% |
+
+> **更正 X.18.5(a) 的一個數字。** 當時引用的「+0.27%」是在 40 筆的子集上
+> 取的中位數，**掩蓋了很強的 SNR 依賴**：暗源那一半的中位抬高其實是
+> **+13.0%**，亮源那一半才是 +0.11%。當時據此說「量級不足以單獨解釋」的
+> 推論因此建立在一個被平均掉的數字上，應該打折看待。這一項的實際影響
+> 比當時寫的大，但**是否足以解釋 X.18 的偏差要等重跑才知道**——
+> rank 偏差在高低 SNR 幾乎相同（61.0 / 63.5），而這個缺陷在暗源上強得多，
+> 兩者的特徵仍然對不上。
+
+## X.19.4 對已存檔資料的影響：真值處的 lnL
+
+用已存檔的 94 筆重算**真實參數處**的 lnL（沒有重跑 campaign）：
+
+| | Δ lnL（修正後 − 修正前） |
+|---|---|
+| 中位數 | **+4.240** |
+| 平均 | +4.280 |
+| 5 / 95 百分位 | −2.40 / +10.55 |
+| 真值處 lnL 變高的比例 | **81%** |
+| 暗的一半（中位數） | +2.220 |
+| 亮的一半（中位數） | +5.843 |
+
+逐筆抽樣：
+
+| idx | SNR | 修正前 | 修正後 | Δ |
+|---|---|---|---|---|
+| 11 | 3.3 | 28.673 | 24.225 | −4.447 |
+| 4 | 4.8 | 27.027 | 28.931 | +1.904 |
+| 1 | 31.3 | 20.818 | 26.378 | +5.560 |
+| 8 | 40.2 | 22.752 | 25.252 | +2.501 |
+| 0 | 73.5 | 15.557 | 27.403 | **+11.845** |
+| 3 | 149.2 | 22.490 | 28.333 | +5.843 |
+| 16 | 225.9 | 22.180 | 27.906 | +5.726 |
+| 13 | 585.7 | 16.134 | 27.058 | **+10.924** |
+
+**真值處的 lnL 系統性變高**，量級與預期一致：帶雜訊的樣板在 16 條基線上
+造成的懲罰約為 `N/2 = 8` nats 的量級。修正前 likelihood 在系統性地
+懲罰真實參數，這正是會讓後驗偏移或偏窄的機制。
+
+**這不代表 X.18 的偏差已經解決**——要重跑 campaign 才知道。
+
+## X.19.5 順帶記錄（未處理）
+
+`loglike()` 目前先呼叫 `build_ring_image(theta, model_context)` 做可表示性
+檢查，接著 `sim.simulate()` 內部又建了一次同樣的影像。**影像被建了兩次**，
+likelihood 的成本因此約為必要值的兩倍。這是 X.16 引入可表示性檢查時帶進來的，
+與本輪的缺陷無關，**未修**。
+
+## X.19.6 產出
+
+| 路徑 | 內容 |
+|---|---|
+| `tests/test_image_uv_sampling.py::TestModelTemplateIsNoiseFree` | 5 項 regression test：simulator 分離預測與觀測、`loglike` 必須等於以 `vis_signal` 為樣板算出的值（且**不等於**以 `.data` 算出的值）、換雜訊種子模型樣板不變、closure phase 同樣鎖住、雜訊確實會抬高 `\|V\|` |

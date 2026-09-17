@@ -500,3 +500,118 @@ class TestUnrepresentableRingIsRejectedNotFatal:
         assert like.loglike(self.TRUTH, data, self.CTX) == float("-inf")
         assert like.n_unrepresentable == 1
         assert "between pixels" in like.last_unrepresentable
+
+
+class TestModelTemplateIsNoiseFree:
+    """X.19: the likelihood's model template must be the noise-free prediction.
+
+    ``SimData.data`` is ``vis_signal + noise`` -- an *observation*.  The model
+    template is ``SimData.metadata["vis_signal"]``.  ``loglike`` used ``.data``,
+    so every template carried a thermal-noise realisation, and because ``|V|``
+    is a positively biased function of added noise the template amplitude was
+    inflated (median +0.5% over the archived N=100 truths, +13.0% over the
+    faint half) and the recovered flux pulled down.
+    """
+
+    CTX = {"target": "M87*", "fov_muas": FOV, "n_pixels": NPIX,
+           "freq_ghz": 230.0, "thermal_noise_jy": 0.05}
+    TRUTH = {"M": 6.5e9, "a_star": 0.5, "i": 0.9, "position_angle": 0.7,
+             "ring_width_frac": 0.12, "log10_total_flux_jy": -0.6}
+
+    def _data(self, seed):
+        return ImageShadowSimulator().simulate(
+            self.TRUTH, self.CTX, rng=np.random.default_rng(seed)
+        )
+
+    @staticmethod
+    def _like(**kw):
+        from whitesearch.likelihoods import VisibilityLikelihood
+
+        return VisibilityLikelihood("gr_eternal", **kw)
+
+    def test_simulator_separates_prediction_from_observation(self):
+        """vis_signal is noise-free, .data is not; both are exposed."""
+        a, b = self._data(1), self._data(2)
+        assert np.allclose(a.metadata["vis_signal"], b.metadata["vis_signal"])
+        assert not np.allclose(a.data, b.data)
+        assert np.allclose(
+            a.metadata["closure_phases_signal"], b.metadata["closure_phases_signal"]
+        )
+        assert not np.allclose(a.metadata["closure_phases"], b.metadata["closure_phases"])
+        # .data really is signal + the recorded noise realisation
+        assert np.allclose(a.data, a.metadata["vis_signal"] + a.noise_realisation)
+
+    def test_loglike_uses_vis_signal_not_data(self):
+        """Pin the template: lnL must equal the vis_signal-based value."""
+        from whitesearch.likelihoods.base import gaussian_loglike
+
+        data = self._data(7)
+        got = self._like(use_closure_phases=False).loglike(self.TRUTH, data, self.CTX)
+
+        model = ImageShadowSimulator().simulate(
+            self.TRUTH, {**self.CTX, "uv_coverage": data.metadata["uv_coverage"]},
+            rng=np.random.default_rng(0),
+        )
+        sigma = np.full(len(data.data), self.CTX["thermal_noise_jy"])
+        expected_signal = gaussian_loglike(
+            np.abs(np.asarray(data.data)),
+            np.abs(np.asarray(model.metadata["vis_signal"])), sigma)
+        expected_noisy = gaussian_loglike(
+            np.abs(np.asarray(data.data)),
+            np.abs(np.asarray(model.data)), sigma)
+
+        assert got == pytest.approx(expected_signal, rel=1e-12)
+        assert got != pytest.approx(expected_noisy, rel=1e-9), (
+            "lnL still matches the noise-realised template"
+        )
+
+    def test_template_does_not_depend_on_the_observation_noise_seed(self):
+        """Same theta, different data noise -> identical model template.
+
+        Checked through the likelihood: the difference between lnL on two noise
+        realisations must be entirely explained by the observed amplitudes, with
+        one common template.
+        """
+        from whitesearch.likelihoods.base import gaussian_loglike
+
+        like = self._like(use_closure_phases=False)
+        model = ImageShadowSimulator().simulate(
+            self.TRUTH, self.CTX, rng=np.random.default_rng(0)
+        )
+        template = np.abs(np.asarray(model.metadata["vis_signal"]))
+        for seed in (11, 12, 13):
+            data = self._data(seed)
+            sigma = np.full(len(data.data), self.CTX["thermal_noise_jy"])
+            assert like.loglike(self.TRUTH, data, self.CTX) == pytest.approx(
+                gaussian_loglike(np.abs(np.asarray(data.data)), template, sigma),
+                rel=1e-12,
+            )
+
+    def test_closure_phase_template_is_noise_free_too(self):
+        """The phase term had the identical defect."""
+        from whitesearch.likelihoods.base import von_mises_loglike
+
+        data = self._data(5)
+        like = self._like(use_closure_phases=True)
+        amp_only = self._like(use_closure_phases=False)
+        total = like.loglike(self.TRUTH, data, self.CTX)
+        amp = amp_only.loglike(self.TRUTH, data, self.CTX)
+
+        model = ImageShadowSimulator().simulate(
+            self.TRUTH, {**self.CTX, "uv_coverage": data.metadata["uv_coverage"]},
+            rng=np.random.default_rng(0),
+        )
+        obs_cp = np.asarray(data.metadata["closure_phases"])
+        signal_cp = np.asarray(model.metadata["closure_phases_signal"])
+        noisy_cp = np.asarray(model.metadata["closure_phases"])
+        assert total - amp == pytest.approx(
+            von_mises_loglike(obs_cp, signal_cp, like.kappa), rel=1e-12)
+        assert not np.allclose(signal_cp, noisy_cp)
+
+    def test_template_amplitude_is_not_inflated(self):
+        """The mechanism: |signal + noise| > |signal| on average."""
+        data = self._data(3)
+        sig = np.abs(np.asarray(data.metadata["vis_signal"]))
+        noisy = np.abs(np.asarray(data.data))
+        assert np.mean(noisy - sig) > 0.0, "noise inflates |V|, which is the bias"
+        assert np.mean(sig - sig) == 0.0

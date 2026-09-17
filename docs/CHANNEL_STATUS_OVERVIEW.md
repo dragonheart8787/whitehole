@@ -21,7 +21,7 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.18） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.19） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -121,7 +121,7 @@ SBC/coverage campaign 的通道。
 | 項目 | 分類 |
 |---|---|
 | **N=100 完整校準已跑完（94 收斂 / 6 被 cap、10.07 h），結果未通過**：`log10_total_flux_jy` 的 KS p = 0.0016 不過 Bonferroni；六個參數的 90% coverage 全部 ≤ 理論值，`i` 低 5.6σ；極端 rank 比例是理論值的 1.6–2.6 倍 | **阻塞性，已回報未修**（見 I-6b） |
-| `VisibilityLikelihood` 用**含雜訊**的 `sim_data.data` 當模型樣板，而非無雜訊的 `vis_signal` | **已確認的缺陷，未修**（同 I-6b） |
+| ~~`VisibilityLikelihood` 用**含雜訊**的 `sim_data.data` 當模型樣板~~ | **已修正**（X.19）。真值處 lnL 中位提高 +4.24，81% 的注入變好。**尚未重跑 campaign** |
 | `bh_accretion` 的振幅仍以峰值亮度參數化，先驗預測 19.3% 在 SNR > 10³ | **已回報、刻意未改**（見 I-7） |
 | `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
 | **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」；第一次嘗試已執行但未完成（I-6） | 待執行 |
@@ -399,7 +399,14 @@ coverage 沒有明顯差異，所以這個選擇效應大概不是下列偏差�
 - **結論**：**這不是「gr_eternal 已校準」。** 在處理成因之前，這條通道的
   後驗區間不能當作可信的不確定度。94 筆的 rank 與 CI 已存檔，
   修正後重跑可直接對照。
-- **要決定的**：先處理 (a)、(b) 哪一個，或兩個一起。
+- **(a) 已於 X.19 修正**：模型樣板改用無雜訊的 `vis_signal`（closure phase
+  同樣改用新增的 `closure_phases_signal`）。修正後樣板抬高精確為 0
+  （修正前中位 +0.51%，暗源那一半 +13.0%）；用已存檔的 94 筆重算，
+  **真值處 lnL 中位提高 +4.24，81% 的注入變好**。
+  **X.18 的偏差是否因此解決，要重跑 campaign 才知道。**
+  同時更正 X.18.5(a) 引用的 +0.27%——那是 40 筆子集的中位數，
+  掩蓋了很強的 SNR 依賴。
+- **要決定的**：是否重跑 campaign 驗證 (a)，或先併上 (b) 再一起跑。
 - **分類**：**需要你做一個決定**。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.18。原始數字：
   `docs/calibration/image_gr_eternal_n100_injections.csv`、
