@@ -57,7 +57,7 @@ def _override_brightness_prior(model, lo: float, hi: float):
 def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             checkpoint_dt: float = 45.0,
             brightness_prior: tuple[float, float] | None = None,
-            cap_s: float = 1500.0) -> dict:
+            cap_s: float = 1500.0, nact: int | None = None) -> dict:
     """Advance one injection by at most `timeout_s` of sampling.
 
     Injections are resumable: a shard that runs out of time leaves the record
@@ -65,6 +65,11 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     picks it up from bilby's checkpoint.  ``cap_s`` is the TOTAL wall-clock an
     injection may consume across all shards; past it the record is closed as
     ``timeout_capped`` so one expensive draw cannot eat the whole campaign.
+
+    ``nact`` overrides the random-walk chain length (bilby's
+    ``AcceptanceTrackingRWalk`` accepts an average of ``2 * nact`` steps per
+    proposal).  Leaving it ``None`` keeps ``BilbyRunner``'s default of 2, which
+    is what every archived campaign used.
     """
     path = outdir / f"inj_{idx:04d}.json"
     prior_rec: dict = {}
@@ -102,6 +107,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         path.write_text(json.dumps(rec, indent=1))
         return rec
 
+    extra_kwargs = {} if nact is None else {"nact": int(nact)}
     runner = BilbyRunner(
         sampler="dynesty",
         nlive=nlive,
@@ -113,6 +119,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         # nothing was ever written and every shard restarted from scratch.
         check_point_delta_t=checkpoint_dt,
         check_point_plot=False,
+        **extra_kwargs,
     )
     names = BilbyRunner.effective_parameter_names(model, like)
 
@@ -129,6 +136,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         "use_closure_phases": False,
         "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
         "cap_s": cap_s,
+        "nact_requested": None if nact is None else int(nact),
     }
 
     t0 = time.monotonic()
@@ -139,6 +147,9 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         rec["status"] = "ok"
         rec["n_posterior"] = int(len(post))
         rec["log_evidence"] = float(res.log_evidence)
+        # Cumulative dynesty ncall: the behavioural evidence that a chain-length
+        # change took effect, rather than the kwargs dict echoing the request.
+        rec["ncall"] = int(res.metadata.get("num_likelihood_evaluations", 0))
         rec["sampler_kwargs"] = {
             k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
             for k, v in res.metadata.get("sampler_kwargs", {}).items()
@@ -195,6 +206,12 @@ def main() -> None:
                     help="total wall-clock an injection may use across shards")
     ap.add_argument("--brightness-prior", dest="brightness_prior", default=None,
                     help="EXPERIMENTAL 'lo,hi' override of log10_total_flux_jy bounds")
+    ap.add_argument("--nact", type=int, default=None,
+                    help="dynesty rwalk chain length (2*nact accepted steps); "
+                         "default None keeps BilbyRunner's nact=2")
+    ap.add_argument("--indices", default=None,
+                    help="comma-separated injection indices to run, instead of "
+                         "the --start/--n range")
     ap.add_argument("--outroot", default="artifacts/image_sbc")
     a = ap.parse_args()
 
@@ -205,12 +222,16 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     t_start = time.monotonic()
     done = 0
-    for i in range(a.start, a.start + a.n):
+    if a.indices:
+        todo = [int(x) for x in a.indices.split(",") if x.strip()]
+    else:
+        todo = list(range(a.start, a.start + a.n))
+    for i in todo:
         if time.monotonic() - t_start > a.budget:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
         r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt,
-                    bp, a.cap)
+                    bp, a.cap, a.nact)
         done += 1
         print(
             f"[{i:04d}] {r['status']:15s} cum={r.get('cum_wall_s', 0):7.1f}s "

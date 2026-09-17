@@ -354,6 +354,13 @@ class BilbyRunner:
             "seed": self.seed,
             "sampler_kwargs": actual_kwargs,
             "requested_sampler_kwargs": requested_kwargs,
+            # Cumulative across resumes (dynesty's own ncall), so it is the
+            # behavioural check that a chain-length setting such as ``nact``
+            # actually reached the sampler -- a kwargs dict only shows what was
+            # requested.
+            "num_likelihood_evaluations": int(
+                getattr(result, "num_likelihood_evaluations", 0) or 0
+            ),
             "bound_fallback_occurred": bound_fallback is not None,
             "sampled_parameters": list(sampled_names),
             "model_parameters": list(model.parameter_names),

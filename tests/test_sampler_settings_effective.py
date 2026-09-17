@@ -81,6 +81,42 @@ class TestChainLengthKnob:
     def test_runner_forwards_nact(self):
         assert BilbyRunner(nact=8).sampler_kwargs["nact"] == 8
 
+    def test_run_metadata_carries_the_cost_counter(
+        self, tmp_path, monkeypatch
+    ):
+        """ncall is recorded, because it is how a chain-length change is checked.
+
+        bilby's own result kwargs do NOT contain ``nact`` even when it is fully
+        in effect (K.2.3), so the only run-level evidence that a longer chain
+        was actually used is the likelihood-call count.  Losing this key would
+        quietly remove the cost half of every chain-length comparison.
+        """
+        import pandas as pd
+
+        import whitesearch.inference.bilby_runner as mod
+        from whitesearch.likelihoods import GWLikelihood
+        from whitesearch.models import BlackToWhiteBounce
+        from whitesearch.simulators import get_simulator
+        from whitesearch.cli import _default_context
+
+        if not mod.BILBY_AVAILABLE:
+            pytest.skip("bilby not installed")
+
+        class _FakeResult:
+            log_evidence = -1.0
+            log_evidence_err = 0.1
+            num_likelihood_evaluations = 123456
+            posterior = pd.DataFrame({"M": [60.0], "log_likelihood": [-1.0]})
+
+        monkeypatch.setattr(mod.bilby, "run_sampler", lambda *a, **k: _FakeResult())
+
+        ctx = _default_context("gw")
+        model = BlackToWhiteBounce()
+        data = get_simulator("gw").simulate(model.sample_prior(), ctx)
+        runner = BilbyRunner(force_toy=False, nlive=10, outdir=str(tmp_path), seed=0)
+        md = runner.run(GWLikelihood(), data, ctx, model, label="ncall_test").metadata
+        assert md["num_likelihood_evaluations"] == 123456
+
 
 class TestBudgetGuard:
     """An independent budget, because dynesty's maxcall is overwritten by bilby."""
