@@ -21,7 +21,7 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.19） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.20） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -94,8 +94,8 @@ SBC/coverage campaign 的通道。
 
 ### image / VLBI（`gr_eternal`、`bh_accretion`）
 
-**成熟度：完整 N=100 校準已跑完，但未通過。**
-後驗系統性過窄、`log10_total_flux_jy` 有顯著 rank 偏差，見 I-6b。
+**成熟度：完整 N=100 校準跑過兩輪，仍未通過，但殘留已具名。**
+模型樣板修正後大幅改善；剩下 (b) 後驗偏窄與 (c) 振幅機率模型，見 I-6c。
 
 | 已完成的修正 | commit |
 |---|---|
@@ -120,7 +120,7 @@ SBC/coverage campaign 的通道。
 
 | 項目 | 分類 |
 |---|---|
-| **N=100 完整校準已跑完（94 收斂 / 6 被 cap、10.07 h），結果未通過**：`log10_total_flux_jy` 的 KS p = 0.0016 不過 Bonferroni；六個參數的 90% coverage 全部 ≤ 理論值，`i` 低 5.6σ；極端 rank 比例是理論值的 1.6–2.6 倍 | **阻塞性，已回報未修**（見 I-6b） |
+| **N=100 完整校準跑過兩輪**：修正模型樣板後（I-6c）四個參數的 rank 問題解決、coverage 平均 0.800 → 0.839（理論 0.891），但仍未通過——殘留 (b) 後驗偏窄與 (c) 振幅機率模型 | **阻塞性，已收斂成兩個具名殘留**（見 I-6b、I-6c） |
 | ~~`VisibilityLikelihood` 用**含雜訊**的 `sim_data.data` 當模型樣板~~ | **已修正**（X.19）。真值處 lnL 中位提高 +4.24，81% 的注入變好。**尚未重跑 campaign** |
 | `bh_accretion` 的振幅仍以峰值亮度參數化，先驗預測 19.3% 在 SNR > 10³ | **已回報、刻意未改**（見 I-7） |
 | `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
@@ -411,6 +411,49 @@ coverage 沒有明顯差異，所以這個選擇效應大概不是下列偏差�
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.18。原始數字：
   `docs/calibration/image_gr_eternal_n100_injections.csv`、
   `image_gr_eternal_n100_rank_coverage.csv`。
+
+### I-6c｜image｜模型樣板修正後的重新驗證 —— **大幅改善，但仍未通過**
+
+用修正後的 likelihood（X.19）對**完全相同的 100 筆注入**重跑（`nact` 仍是 2，
+只改 (a) 以免混淆）。注入由 seed 決定，逐位元重現（重建 100 筆只要 0.55 s，
+與 X.18 存檔比對 0 個不一致），所以是受控對照；用了全新輸出目錄，
+避免 bilby resume 舊 likelihood 的鏈。
+
+**執行**：100 起跑 / **95 收斂** / **5 capped**，10.23 h（X.18 是 94/6、10.07 h）。
+收斂行為基本不變。
+
+| 參數 | rank 平均 前→後 | KS p 前→後 | 90% cov 前→後 |
+|---|---|---|---|
+| `M` | 56.8 → **50.1** | 0.0478 → **0.8354** | 0.883 → 0.863 |
+| `a_star` | 44.4 → 43.4 | 0.2361 → 0.1345 | 0.809 → 0.832 |
+| `i` | 47.0 → 48.0 | 0.0194 → **0.5875** | **0.713 → 0.842** |
+| `position_angle` | 52.4 → 56.5 | 0.0329 → 0.0193 | 0.766 → 0.800 |
+| `ring_width_frac` | 45.5 → **51.0** | 0.0970 → **0.7817** | 0.798 → 0.842 |
+| `log10_total_flux_jy` | **62.2 → 39.6** | 0.0016 → **0.0014** | 0.830 → 0.853 |
+| 六參數 90% cov 平均 | 0.800 → **0.839** | | 理論 0.891 |
+
+**(a) 是真正的貢獻者，但不是唯一問題：**
+
+1. **四個參數的 rank 問題解決了**：`M`、`i`、`ring_width_frac` 從邊緣或
+   不合格變成明確通過；`i` 的 coverage 從全場最差的 −5.6σ 收到 −1.5σ，
+   極端 rank 從 0.287（理論 2.6 倍）降到 0.158。
+2. **coverage 偏低減輕但沒消失**：平均 0.800 → 0.839（理論 0.891），
+   六個仍全部 ≤ 理論值，`position_angle` 還有 −2.9σ。特徵與 **(b)**
+   （`nact = 2` 鏈長不足 → 後驗偏窄）一致，但本輪沒測 (b)，是推論不是結論。
+3. **流量的 rank 偏差換邊而非消失**：62.2 → **39.6**（從後驗低估變成高估），
+   KS p 實質不變。**符號翻轉指向 (c)**：`|V_obs|` 是 Rician、
+   `E|V_obs| > |V_signal|`，用以無雜訊 `|V_model|` 為中心的高斯擬合就得把
+   流量往上推。量級檢查：資料側預期抬高中位 1.386%，後驗流量 1σ 寬度 3.08%
+   → 約 0.45σ 的推力；實測 rank 位移 0.36 個 rank 標準差。**方向與量級都吻合。**
+   **(a) 與 (c) 原本互相掩蓋**——X.18 的樣板也被自己的雜訊墊高，意外抵銷了
+   資料側的 Rician 抬高；修掉 (a) 讓 (c) 裸露出來。
+
+- **結論**：**仍然不是「gr_eternal 已校準」**，但問題已從「一個未知的
+  系統性偏差」收斂成兩個具名的殘留：(b) 後驗偏窄、(c) 振幅的機率模型。
+- **要決定的**：先測 (b)（`nact`）還是先處理 (c)（振幅 likelihood 形式）。
+- **分類**：**需要你做一個決定**。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.20。原始數字：
+  `docs/calibration/image_gr_eternal_n100_templatefix_*.csv`。
 
 ### I-7｜image｜`bh_accretion` 的振幅參數化 —— **回報，本輪未改**
 
