@@ -56,10 +56,24 @@ def _override_brightness_prior(model, lo: float, hi: float):
 
 def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             checkpoint_dt: float = 45.0,
-            brightness_prior: tuple[float, float] | None = None) -> dict:
+            brightness_prior: tuple[float, float] | None = None,
+            cap_s: float = 1500.0) -> dict:
+    """Advance one injection by at most `timeout_s` of sampling.
+
+    Injections are resumable: a shard that runs out of time leaves the record
+    with ``final = False`` and a running ``cum_wall_s``, and the next shard
+    picks it up from bilby's checkpoint.  ``cap_s`` is the TOTAL wall-clock an
+    injection may consume across all shards; past it the record is closed as
+    ``timeout_capped`` so one expensive draw cannot eat the whole campaign.
+    """
     path = outdir / f"inj_{idx:04d}.json"
+    prior_rec: dict = {}
+    cum = 0.0
     if path.exists():
-        return json.loads(path.read_text())
+        prior_rec = json.loads(path.read_text())
+        if prior_rec.get("final", False):
+            return prior_rec
+        cum = float(prior_rec.get("cum_wall_s", 0.0))
 
     seed = 700_000 + idx
     ctx = {**_default_context("image"), "target": target, "rng_seed": seed}
@@ -82,6 +96,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         # campaign's denominator stays honest.
         rec = {"idx": idx, "target": target, "seed": seed, "nlive": nlive,
                "status": "unrepresentable", "reason": str(exc), "wall_s": 0.0,
+               "cum_wall_s": 0.0, "final": True,
                "theta_true": {k: float(v) for k, v in theta.items()}}
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(rec, indent=1))
@@ -93,7 +108,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         outdir=str(outdir / "bilby"),
         resume=True,
         seed=seed,
-        run_timeout_s=timeout_s,
+        run_timeout_s=min(timeout_s, max(cap_s - cum, 1.0)),
         # bilby's default check_point_delta_t is 600 s, longer than a shard, so
         # nothing was ever written and every shard restarted from scratch.
         check_point_delta_t=checkpoint_dt,
@@ -113,6 +128,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         "network_snr": float(np.sqrt(((sig / ctx["thermal_noise_jy"]) ** 2).sum())),
         "use_closure_phases": False,
         "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
+        "cap_s": cap_s,
     }
 
     t0 = time.monotonic()
@@ -142,13 +158,23 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
                 f"{int(100*lv)}": list(compute_credible_interval(s, lv))
                 for lv in CI_LEVELS
             }
+        rec["final"] = True
     except SamplingBudgetExceeded as exc:
         rec["status"] = "timeout"
         rec["reason"] = str(exc)
+        rec["final"] = False
     except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
         rec["status"] = "error"
         rec["reason"] = f"{type(exc).__name__}: {exc}"
+        rec["final"] = True
     rec["wall_s"] = round(time.monotonic() - t0, 2)
+    rec["cum_wall_s"] = round(cum + rec["wall_s"], 2)
+    rec["n_shards"] = int(prior_rec.get("n_shards", 0)) + 1
+    if not rec["final"] and rec["cum_wall_s"] >= cap_s:
+        # Spent its whole allowance without converging; close it so the
+        # campaign moves on and the denominator stays honest.
+        rec["status"] = "timeout_capped"
+        rec["final"] = True
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, indent=1))
@@ -165,6 +191,8 @@ def main() -> None:
     ap.add_argument("--budget", type=float, default=520.0,
                     help="stop launching new injections after this many seconds")
     ap.add_argument("--checkpoint-dt", dest="checkpoint_dt", type=float, default=45.0)
+    ap.add_argument("--cap", type=float, default=1500.0,
+                    help="total wall-clock an injection may use across shards")
     ap.add_argument("--brightness-prior", dest="brightness_prior", default=None,
                     help="EXPERIMENTAL 'lo,hi' override of log10_total_flux_jy bounds")
     ap.add_argument("--outroot", default="artifacts/image_sbc")
@@ -181,12 +209,14 @@ def main() -> None:
         if time.monotonic() - t_start > a.budget:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
-        r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt, bp)
+        r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt,
+                    bp, a.cap)
         done += 1
         print(
-            f"[{i:04d}] {r['status']:8s} {r['wall_s']:7.1f}s "
+            f"[{i:04d}] {r['status']:15s} cum={r.get('cum_wall_s', 0):7.1f}s "
+            f"final={str(r.get('final', False)):5s} "
             f"snr={r.get('network_snr', float('nan')):9.1f} "
-            f"npost={r.get('n_posterior', 0):5d} r={r.get('r_ring_muas', 0):6.2f}",
+            f"npost={r.get('n_posterior', 0):5d}",
             flush=True,
         )
     print(f"SHARD-DONE launched={done} elapsed={time.monotonic()-t_start:.1f}s", flush=True)
