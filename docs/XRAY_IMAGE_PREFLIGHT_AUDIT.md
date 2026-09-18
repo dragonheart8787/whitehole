@@ -2361,3 +2361,141 @@ Wilcoxon p = 0.265–0.865，**沒有一個達到顯著**。
   以及六參數的 `in90` / `w90` / `rank` 兩組並排）
 - `scripts/analyse_sampler_pilot.py`（通用配對比較，X.21 的
   `analyse_nact_pilot.py` 保留不動）
+
+---
+
+# X.23 可見度雜訊 sigma 一致性核對
+
+X.21 / X.22 用行為驗證排除了兩個取樣器旋鈕，代表取樣器忠實重建了
+**likelihood 程式碼所定義的**後驗。那麼殘留的「六參數均勻偏窄」就必須來自
+likelihood 定義的機率模型本身。全域的變異數尺度不匹配（假設的 `sigma`
+比實際小）會讓所有參數**同等比例**地過窄，樣態正好吻合。
+
+**本節是純粹的程式碼閱讀 + 數值核對，沒有跑任何取樣，沒有改動任何
+production 程式碼。**
+
+## X.23.1 兩側的 sigma 各自是什麼
+
+**模擬器**（`ImageShadowSimulator.simulate`，`image_shadow.py:467, 491-494`）：
+
+```python
+thermal_noise_jy = float(context.get("thermal_noise_jy", 0.05))
+...
+noise_re = rng.standard_normal(len(vis_signal)) * thermal_noise_jy
+noise_im = rng.standard_normal(len(vis_signal)) * thermal_noise_jy
+visibilities = vis_signal + (noise_re + 1j * noise_im)
+```
+
+→ **實部與虛部各自** sd = `thermal_noise_jy`（單位 Jy）。
+接著寫進 metadata：`"thermal_noise_jy": thermal_noise_jy`（第 518 行）。
+
+**likelihood**（`VisibilityLikelihood.loglike`，`visibility.py:131-133`）：
+
+```python
+sigma_vis = float(meta.get("thermal_noise_jy", context.get("thermal_noise_jy", 0.05)))
+sigma_arr = np.full(len(obs_vis), sigma_vis)
+if "sigma" in meta:
+    sigma_arr = np.asarray(meta["sigma"], dtype=float)
+```
+
+→ 套用在**振幅** `|V|` 上（第 191/193 行 `gaussian_loglike(obs_amp, model_amp, sigma_arr)`）。
+
+## X.23.2 逐項核對
+
+| 核對項 | 結果 |
+|---|---|
+| **是不是同一個數值路徑** | **是。** 全樹只有三處出現 `thermal_noise_jy`：模擬器讀 context、模擬器寫 metadata、likelihood 讀 metadata（metadata-first）。**likelihood 讀的是模擬器記錄下來的那個值本身**，不是獨立重新推導的——不存在「兩個各自定義、可能漂移」的數字。 |
+| **同一個物理定義** | **是。** 兩側都是「每條基線的熱雜訊」。 |
+| **同一組單位** | **是。** 兩側都是 Jy。 |
+| **數值** | 兩側都是 `configs/instruments/eht.yaml` 的 `imaging.thermal_noise_jy: 0.05`，經 `dataio.eht.eht_imaging_config()` 進 context。 |
+| **有沒有漏乘/多乘 √2 或 2** | **沒有。** 見 X.23.3 的數值驗證：高 SNR 下 `sd(\|V\|) / sigma_lik = 0.999–1.001`。若有 √2 錯誤，這個比值會落在 0.707 或 1.414。 |
+| **熱雜訊 vs 系統雜訊的疊加** | **兩側都沒有系統雜訊項。** 全樹沒有 gain error / systematic 之類的第二個雜訊成分，所以不存在「一邊疊加了、一邊沒有」。 |
+| **積分時間 / 頻寬假設** | **兩側都沒有用到。** `thermal_noise_jy` 是設定檔裡手設的常數，不由 SEFD / 頻寬 / 積分時間推導（見 X.23.5 的備註）。因此兩側不可能對它有不同假設。 |
+| **測站數相關的正規化** | **兩側都沒有。** 每條基線一個獨立的雜訊抽樣，likelihood 每條基線一項殘差，`n = min(len(obs), len(model))` 實測是 16 = 16，沒有靜默丟資料。 |
+| **另一個資料產生器** | `EHTLoader._mock_eht_data`（`dataio/eht.py:247`）用 `sigma = rng.uniform(0.02, 0.1, n)` 並以 `visibilities += sigma * (n_re + 1j*n_im)` 施加，**與模擬器同一個 per-component 慣例**，且透過 metadata 的 `"sigma"` 鍵被 likelihood 讀走。兩條資料路徑的慣例一致。SBC campaign 走的是 `ImageShadowSimulator`，它不設 `"sigma"`，所以用的是純量。 |
+
+## X.23.3 數值驗證：慣例是對的，沒有 √2
+
+模擬器給複數雜訊 `n = n_re + i·n_im`，兩個分量各自 sd = σ。
+雜訊在訊號方向上的投影 `Re(n e^{-iφ}) = n_re cosφ + n_im sinφ`
+的 sd 是 `σ·√(cos²+sin²) = σ`。
+所以**高 SNR 下 `|V|` 的 sd 正好是 σ**——likelihood 把同一個 σ 用在振幅上是對的。
+
+蒙地卡羅驗證（每筆 60000 次雜訊實現，用模擬器自己的雜訊配方）：
+
+| 逐基線 SNR `|V|/σ` | `sd(|V|) / sigma_lik` |
+|---|---|
+| 109 | 0.9992 |
+| 70 | 0.9996 |
+| 24 | 0.9993 |
+| 4.7 | 0.9857 |
+| 1.6 | 0.8672 |
+| 1.0 | 0.7810 |
+| 0（Rayleigh 極限） | 0.655 |
+
+高 SNR 端收斂到 1.000。**√2 或 2 的因子錯誤被明確排除。**
+
+## X.23.4 唯一存在的差異：Rician 變異數虧損，而且**方向相反**
+
+`|V_obs|` 服從 Rician 分布，其變異數**恆 ≤ σ²**，從高 SNR 的 σ²
+單調降到零訊號極限的 `(2 − π/2)σ² = 0.429σ²`。
+因此 **likelihood 用的 σ 永遠是高估，不是低估**。
+
+在 X.21/X.22 pilot 的同一批 18 筆上（等權合併各基線）：
+
+| | `r_eff = sd_true / sigma_lik` |
+|---|---|
+| 18 筆中位數 | **0.9612** |
+| 最暗的一筆（網路 SNR 3.8） | 0.7605 |
+| 最亮的一筆（網路 SNR 397.8） | 0.9993 |
+
+在線性高斯近似下，區間半寬 ∝ 假設的 σ、真實誤差 ∝ 真正的 σ，
+所以這個虧損讓區間**偏寬** `1/r_eff`：中位數 **1.040（+4.0%）**，
+最暗的一筆到 1.31。
+
+**這個方向不能解釋 under-coverage，只會造成 over-coverage。**
+換句話說：實際的殘留缺口**比量到的還大一點**，因為 σ 的高估
+正在部分遮蔽它。
+
+用 campaign 真正的雜訊實現直接核對（18 筆 × 16 基線 = 288 個標準化殘差，
+就是 `loglike` 實際除下去的那個量）：
+
+```
+mean z = +0.2120   sd z = 1.0399   (正確的高斯應為 0, 1)
+```
+
+`sd z` 與 1 相容（n = 288 時 sd 的標準誤約 0.042），
+**沒有 17% 量級的尺度不匹配**。
+`mean z = +0.21` 是已知的 Rician 均值偏移，即 X.20.5 的 (c)。
+
+## X.23.5 一併記錄的 provenance 觀察（不是兩側的不匹配）
+
+`configs/instruments/eht.yaml` 同時載有 `bandwidth_ghz: 2.0` 與每個測站的
+`sefd_jy`，但 `thermal_noise_jy: 0.05` **不是**由它們推導出來的，是手設值。
+用輻射計公式 `σ = √(SEFD₁·SEFD₂ / (2·Δν·t_int))` 對 8 站 28 條基線核算：
+
+| `t_int` | 最小 | 中位數 | 最大 |
+|---|---|---|---|
+| 10 s | 0.0020 Jy | 0.0264 Jy | 0.0600 Jy |
+| 300 s | 0.0004 Jy | 0.0048 Jy | 0.0110 Jy |
+
+0.05 Jy 落在 10 s 積分的**悲觀端**，量級合理，但真實 EHT 的逐基線 σ
+是高度不均勻的（ALMA 基線比 SMTO–JCMT 好約 30 倍），而這裡用的是均勻值。
+**這是一個簡化，不是兩側的不一致**——模擬器與 likelihood 用的是同一個
+簡化後的數字。記錄在此，是否要改由你決定。
+
+## X.23.6 結論：**排除**
+
+**模擬器與 likelihood 的 sigma 是同一個數字，走同一條路徑，
+同一個物理定義、同一組單位，沒有任何因子差異。**
+唯一存在的變異數差異是 Rician 虧損，它的**符號與需求相反**
+（讓區間偏寬 +4.0% 中位數，而非偏窄），量級也遠小於缺口所需的 +17.3%。
+
+**「likelihood 假設的 sigma 太小導致六參數均勻偏窄」這個候選被排除。**
+依指示，本輪未修改任何程式碼，也未往下猜新的候選方向。
+
+## X.23.7 產出
+
+- `tests/test_image_noise_sigma_consistency.py`（6 個測試，釘住 per-component
+  慣例、高 SNR 下無 √2、Rician 虧損的**符號**，以及 `loglike` 確實用了
+  記錄下來的 sigma 而不是讀了卻不用）
