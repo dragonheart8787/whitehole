@@ -1,0 +1,19 @@
+level,scope,hits,n,coverage,reference,p_value,p_bonferroni,method
+90,M,82,95,0.863158,0.8825,0.323071,1,binomial
+90,a_star,79,95,0.831579,0.8825,0.0879954,0.527973,binomial
+90,i,80,95,0.842105,0.8825,0.14431,0.865857,binomial
+90,position_angle,76,95,0.8,0.8825,0.0139269,0.0835611,binomial
+90,ring_width_frac,80,95,0.842105,0.8825,0.14431,0.865857,binomial
+90,log10_total_flux_jy,81,95,0.852632,0.8825,0.222635,1,binomial
+90,COMBINED,478,570,0.838596,0.8825,0.00346,0.00346,injection-level bootstrap
+90,COMBINED_naive_pooled,478,570,0.838596,0.8825,0.00110924,0.00110924,pooled binomial
+90,COMBINED_fisher,-1,6,0.838596,0.8825,0.0093681,0.0093681,Fisher on per-parameter p
+68,M,56,95,0.589474,0.6671,0.0688993,0.413396,binomial
+68,a_star,59,95,0.621053,0.6671,0.198512,1,binomial
+68,i,60,95,0.631579,0.6671,0.263395,1,binomial
+68,position_angle,52,95,0.547368,0.6671,0.010064,0.0603843,binomial
+68,ring_width_frac,57,95,0.6,0.6671,0.101606,0.609639,binomial
+68,log10_total_flux_jy,66,95,0.694737,0.6671,0.749707,1,binomial
+68,COMBINED,350,570,0.614035,0.6671,0.002005,0.002005,injection-level bootstrap
+68,COMBINED_naive_pooled,350,570,0.614035,0.6671,0.0044294,0.0044294,pooled binomial
+68,COMBINED_fisher,-1,6,0.614035,0.6671,0.012225,0.012225,Fisher on per-parameter p
