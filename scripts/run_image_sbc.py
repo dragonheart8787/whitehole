@@ -57,7 +57,8 @@ def _override_brightness_prior(model, lo: float, hi: float):
 def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             checkpoint_dt: float = 45.0,
             brightness_prior: tuple[float, float] | None = None,
-            cap_s: float = 1500.0, nact: int | None = None) -> dict:
+            cap_s: float = 1500.0, nact: int | None = None,
+            dlogz: float | None = None) -> dict:
     """Advance one injection by at most `timeout_s` of sampling.
 
     Injections are resumable: a shard that runs out of time leaves the record
@@ -68,8 +69,9 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
 
     ``nact`` overrides the random-walk chain length (bilby's
     ``AcceptanceTrackingRWalk`` accepts an average of ``2 * nact`` steps per
-    proposal).  Leaving it ``None`` keeps ``BilbyRunner``'s default of 2, which
-    is what every archived campaign used.
+    proposal).  ``dlogz`` overrides dynesty's stopping threshold on the
+    remaining evidence.  Leaving either ``None`` keeps ``BilbyRunner``'s
+    defaults (2 and 0.1), which is what every archived campaign used.
     """
     path = outdir / f"inj_{idx:04d}.json"
     prior_rec: dict = {}
@@ -107,7 +109,11 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         path.write_text(json.dumps(rec, indent=1))
         return rec
 
-    extra_kwargs = {} if nact is None else {"nact": int(nact)}
+    extra_kwargs: dict = {}
+    if nact is not None:
+        extra_kwargs["nact"] = int(nact)
+    if dlogz is not None:
+        extra_kwargs["dlogz"] = float(dlogz)
     runner = BilbyRunner(
         sampler="dynesty",
         nlive=nlive,
@@ -137,6 +143,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
         "cap_s": cap_s,
         "nact_requested": None if nact is None else int(nact),
+        "dlogz_requested": None if dlogz is None else float(dlogz),
     }
 
     t0 = time.monotonic()
@@ -209,6 +216,9 @@ def main() -> None:
     ap.add_argument("--nact", type=int, default=None,
                     help="dynesty rwalk chain length (2*nact accepted steps); "
                          "default None keeps BilbyRunner's nact=2")
+    ap.add_argument("--dlogz", type=float, default=None,
+                    help="dynesty stopping threshold on remaining evidence; "
+                         "default None keeps BilbyRunner's dlogz=0.1")
     ap.add_argument("--indices", default=None,
                     help="comma-separated injection indices to run, instead of "
                          "the --start/--n range")
@@ -231,7 +241,7 @@ def main() -> None:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
         r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt,
-                    bp, a.cap, a.nact)
+                    bp, a.cap, a.nact, a.dlogz)
         done += 1
         print(
             f"[{i:04d}] {r['status']:15s} cum={r.get('cum_wall_s', 0):7.1f}s "
