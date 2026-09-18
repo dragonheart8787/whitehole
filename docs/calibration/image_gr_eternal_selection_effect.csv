@@ -1,0 +1,27 @@
+level,quantity,value,ci_low,ci_high,p_value
+90,logit_slope_log10(SNR),0.0331894,-0.367162,0.42848,0.8965
+90,tertile0_log10(SNR),0.833333,,,
+90,tertile1_log10(SNR),0.83871,,,
+90,tertile2_log10(SNR),0.84375,,,
+90,logit_slope_log10(cost),0.219235,-0.323207,0.819702,0.432
+90,tertile0_log10(cost),0.828125,,,
+90,tertile1_log10(cost),0.833333,,,
+90,tertile2_log10(cost),0.854167,,,
+90,pooled_high-cost tertile rate,0.839375,,,
+90,pooled_near-cap rate,0.8425,,,
+90,pooled_BOUND: all 5 fully covered,0.846667,,,
+90,pooled_BOUND: all 5 fully missed,0.796667,,,
+90,selection_ceiling_fraction,0.183816,,,
+68,logit_slope_log10(SNR),0.0473496,-0.197791,0.293674,0.698
+68,tertile0_log10(SNR),0.588542,,,
+68,tertile1_log10(SNR),0.66129,,,
+68,tertile2_log10(SNR),0.59375,,,
+68,logit_slope_log10(cost),0.144919,-0.235174,0.537192,0.443
+68,tertile0_log10(cost),0.59375,,,
+68,tertile1_log10(cost),0.629032,,,
+68,tertile2_log10(cost),0.619792,,,
+68,pooled_high-cost tertile rate,0.614323,,,
+68,pooled_near-cap rate,0.616667,,,
+68,pooled_BOUND: all 5 fully covered,0.633333,,,
+68,pooled_BOUND: all 5 fully missed,0.583333,,,
+68,selection_ceiling_fraction,0.363672,,,
