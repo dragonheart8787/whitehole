@@ -13,8 +13,8 @@ WhiteSearch 是一個 candidate ranking engine（候選訊號排序引擎），
 與 M87\* 的真實影像資料無關，也不是天文物理結論。
 
 **本文件是敘事與最終結論。** 逐輪的原始證據、完整數表與方法細節留在
-`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` 的 **X.18 – X.30**
-與 `docs/CHANNEL_STATUS_OVERVIEW.md` 的 **I-6b – I-6n**，
+`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` 的 **X.18 – X.31**
+與 `docs/CHANNEL_STATUS_OVERVIEW.md` 的 **I-6b – I-6o**，
 兩邊維持不變，本文件只標明出處，不複製細節。
 
 ---
@@ -298,9 +298,13 @@ X.19（`16e2003`）的模型樣板修正**不該因為它沒有解決全部問�
 
 ### 最終建議
 
-> **`gr_eternal` 在 M87\* 上：機制已知的部分已修正；
-> 殘留一個真實但成因未知的系統性 under-coverage（約需 +11.8% 區間增寬）；
+> **`gr_eternal` 在 M87\* 與 Sgr A\* 上：機制已知的部分已修正；
+> 殘留一個真實但成因未知的系統性 under-coverage
+> （合併 194 筆的估計約需 **+9.1%** 區間增寬，95% CI [3.5%, 14.8%]）；
 > 不建議宣稱這個通道已完全校準，但目前沒有已知、可修正的具體 bug。**
+
+（原本只依 M87\* 的估計是 +11.8%；X.31 加入 Sgr A\* 後合併為 +9.1%。
+兩個目標的差異本身不顯著，見下方「跨目標交叉驗證」。）
 
 不建議繼續投入資源猜測新的候選機制，除非出現一個**新的資訊來源**
 （例如 Sgr A\* 的獨立校準，見下），而不是對同一批資料換一個角度再看一次。
@@ -337,11 +341,61 @@ X.19（`16e2003`）的模型樣板修正**不該因為它沒有解決全部問�
    docstring 寫 "highest posterior density"，實作是等尾分位數。
    等尾區間本身合法、SBC coverage 對它同樣成立，不影響任何結論，
    但名稱會誤導讀者。未修。
-7. **Sgr A\* 從未測試過這整條校準路徑。** X.18 – X.30 的每一個數字
-   都來自 M87\*。`utils/targets.py` 有 Sgr A\* 的完整常數，
-   但它從未跑過一次 SBC/coverage campaign。
-   **不應假設這裡的結論可以直接套到它身上**——兩個目標的質量先驗
-   差 3.31 dex、環半徑與 uv 覆蓋的關係完全不同。
+7. ~~**Sgr A\* 從未測試過這整條校準路徑。**~~ **已解除（X.31）**：
+   Sgr A\* 的完整 N = 100 campaign 已跑完（99 筆收斂），結果見下方
+   「跨目標交叉驗證」一節。原本的擔憂（兩個目標的質量先驗差 3.31 dex、
+   環半徑與 uv 覆蓋的關係完全不同）是合理的，但實測顯示
+   **pipeline 在第二個目標上同樣可行**。
+
+---
+
+## 跨目標交叉驗證：Sgr A\*（X.31）
+
+本 postmortem 原本的所有結論都建立在 M87\* 單一目標上。
+X.31 在 **Sgr A\*** 上跑了同一條 pipeline 的完整 N = 100，
+這裡記錄它**如何補強、以及如何限制**上面的結論。
+
+**pipeline 可行**：100 起跑 / **99 收斂**（比 M87\* 的 95 更好）、
+**0 筆** `UnrepresentableRingError`、12.72 h。
+這是一次獨立的架構驗證——同一套程式碼在一個質量先驗窄 3.4 倍、
+SNR 中位數高 2.6 倍的目標上照常運作。
+
+**殘留缺口方向相同、量級約一半**：
+
+| | Sgr A\* | M87\* | 合併（194 筆） |
+|---|---|---|---|
+| 六參數平均 90% coverage | 0.859 | 0.839 | 0.8488 |
+| 叢集穩健 z（90%） | −1.635 | −2.702 | **−3.090** |
+| bootstrap p（90%） | 0.0489 | 0.00346 | **0.00115** |
+| bootstrap p（68%） | 0.1073 | 0.00192 | 0.00254 |
+| **所需區間增寬（90%）** | **6.4%** [0.0, 14.1] | **11.8%** [3.3, 20.2] | **9.1%** [3.5, 14.8] |
+
+**該怎麼讀這三欄，要說清楚：**
+
+- **Sgr A\* 自己只是邊緣顯著**（90% p = 0.0489，68% p = 0.1073 不顯著）。
+  **單靠它不足以建立這個效應。**
+- **但兩個目標的差異本身也不顯著**（兩樣本 bootstrap p = 0.360 / 0.284），
+  信賴區間大幅重疊。所以**不能說 Sgr A\* 校準良好**，
+  也不能說它與 M87\* 呈現不同的模式。
+- **合併之後顯著性提高、區間收窄**（p = 0.00115，所需增寬 9.1%
+  CI [3.5, 14.8]，比 M87\* 單獨的 [3.3, 20.2] 窄）。
+
+**對本 postmortem 結論的影響**：原本「殘留一個真實但成因未知的系統性
+under-coverage」的判斷**成立且被補強**，而且現在有證據說它**不是
+M87\* 特有的**，而比較像是架構層級的現象。最終建議的數字從
+「約需 +11.8%」更新為**合併估計的「約需 +9.1%（CI 3.5–14.8%）」**。
+**但這是補強證據，不是乾淨的確認**——Sgr A\* 若單獨來看是邊緣的。
+
+**一個明確的跨目標差異，未追查**：`log10_total_flux_jy` 的 rank 偏移
+在 M87\* 上明顯（KS p = **0.0014**、rank 平均 **39.6**），
+在 Sgr A\* 上不存在（p = **0.1253**、**46.6**）。方向與 X.20.5 已定性的
+**(c) 的已記錄 SNR 依賴**一致（Rician 抬高約 `σ²/(2|V|)`，
+SNR 越高越小，Sgr A\* 的 SNR 中位數高 2.6 倍）。
+**依指示未對這個差異提出任何新的候選機制。**
+
+**順帶記錄的成本教訓**：pilot 擬合的 `wall ∝ SNR^0.56` 外推 N=100 為 10.3 h，
+實際 12.72 h（高 23%），且預測 0 筆被截斷而實際有 1 筆。
+**冪律成本模型低估高 SNR 尾端**，下次外推要留餘裕。
 
 ---
 
@@ -411,12 +465,13 @@ X.25.7 的「絕大部分缺口沒有被計算機制解釋掉」當時只有點�
 
 ## 出處
 
-- 逐輪原始證據與完整數表：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` **X.18 – X.30**
-- 決策條目與跨通道狀態：`docs/CHANNEL_STATUS_OVERVIEW.md` **I-6b – I-6n**
+- 逐輪原始證據與完整數表：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` **X.18 – X.31**
+- 決策條目與跨通道狀態：`docs/CHANNEL_STATUS_OVERVIEW.md` **I-6b – I-6o**
 - 原始數字（CSV）：`docs/calibration/image_gr_eternal_*.csv`
 - 存檔的 campaign：`artifacts/image_sbc_n20/`（X.18）、`artifacts/image_sbc_fixA/`（X.20）、
   `artifacts/image_sbc_nact8/`、`artifacts/image_sbc_nlive500/`、
-  `artifacts/image_sbc_dlogz001/`、`artifacts/image_sbc_frozenPA/`
+  `artifacts/image_sbc_dlogz001/`、`artifacts/image_sbc_frozenPA/`、
+  `artifacts/image_sbc_sgra/`（X.31）
 - 診斷腳本：`scripts/run_image_sbc.py`、`scripts/analyse_sampler_pilot.py`、
   `scripts/scan_fpix_steps.py`、`scripts/test_coverage_significance.py`、
   `scripts/test_convergence_selection.py`、`scripts/check_position_angle_wrap.py`
