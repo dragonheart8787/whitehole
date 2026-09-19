@@ -21,7 +21,8 @@ WhiteSearch 是 candidate ranking engine（候選訊號排序引擎），不是�
 | `docs/BOUNCE_PREFLIGHT_AUDIT.md` | `bounce` 逐輪原始證據（Part A–J） |
 | `docs/BOUNCE_SBC_COVERAGE_REPORT.md` | `bounce` 工作線敘事總結與最終定性 |
 | `docs/RADIO_PREFLIGHT_AUDIT.md` | radio 通道稽核（R.1–R.15） |
-| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.20） |
+| `docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` | xray + image 通道稽核（X.0–X.30） |
+| `docs/GR_ETERNAL_COVERAGE_INVESTIGATION_POSTMORTEM.md` | `gr_eternal` coverage 缺口調查敘事與最終結論（X.18–X.30 的收尾） |
 | `docs/calibration/*.csv` | 各輪原始數表 |
 
 ---
@@ -95,8 +96,9 @@ SBC/coverage campaign 的通道。
 ### image / VLBI（`gr_eternal`、`bh_accretion`）
 
 **成熟度：完整 N=100 校準跑過兩輪，仍未通過，但殘留已具名。**
-模型樣板修正後大幅改善；`nact`、`nlive`、`dlogz` 三個取樣器旋鈕與 sigma
-一致性都已被排除（I-6d、I-6e、I-6g、I-6h），六參數均勻偏窄**八個候選全部處理完、仍沒有解釋**，見 I-6f。
+模型樣板修正後大幅改善（0.800 → 0.839）；十個候選機制全部以獨立證據排除，
+缺口統計顯著但成因未知。**調查已收尾**，見
+`docs/GR_ETERNAL_COVERAGE_INVESTIGATION_POSTMORTEM.md` 與 I-6f。
 
 | 已完成的修正 | commit |
 |---|---|
@@ -121,7 +123,7 @@ SBC/coverage campaign 的通道。
 
 | 項目 | 分類 |
 |---|---|
-| **N=100 完整校準跑過兩輪**：修正模型樣板後（I-6c）四個參數的 rank 問題解決、coverage 平均 0.800 → 0.839（理論 0.891），但仍未通過；**三個取樣器精度旋鈕（`nact`、`nlive`、`dlogz`）與 sigma 一致性全部被排除**（寬度效應 0.0% / −1.1% / −1.7%，95% 上界 +2.4% / +2.0% / +0.6%，缺口需 **+11.7%**，X.25 更正前寫作 +17.3%），六參數均勻偏窄**候選清單真正用盡** | **阻塞性，需要重想候選方向**（見 I-6b…I-6n） |
+| **N=100 完整校準跑過兩輪**：修正模型樣板後（I-6c）coverage 平均 0.800 → 0.839，但仍未通過；**十個候選機制全部以獨立證據排除**，缺口經正式檢定確認統計顯著（bootstrap p = 0.0035 / 0.0019，所需增寬 +11.8%，95% CI [3.3%, 20.2%]）**但成因未知** | **已充分調查，收尾**；見 `GR_ETERNAL_COVERAGE_INVESTIGATION_POSTMORTEM.md` |
 | ~~`VisibilityLikelihood` 用**含雜訊**的 `sim_data.data` 當模型樣板~~ | **已修正**（X.19）。真值處 lnL 中位提高 +4.24，81% 的注入變好。**尚未重跑 campaign** |
 | `bh_accretion` 的振幅仍以峰值亮度參數化，先驗預測 19.3% 在 SNR > 10³ | **已回報、刻意未改**（見 I-7） |
 | `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
@@ -901,7 +903,34 @@ I-6l 列出的限制：分析的 95 筆是「收斂的」那些，被排除的 5
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.30。原始數字：
   `docs/calibration/image_gr_eternal_position_angle_wrap.csv`。
 
-### I-6f｜image｜六參數均勻 coverage 過窄 —— **現有候選清單已用盡**
+### I-6f｜image｜六參數均勻 coverage 過窄 —— **調查已收尾，見 postmortem**
+
+> **最終狀態與完整敘事：`docs/GR_ETERNAL_COVERAGE_INVESTIGATION_POSTMORTEM.md`**
+> 逐輪原始證據留在 `XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.18–X.30 與下面的
+> I-6b–I-6n，本條不再重複細節。
+
+**一句話結論**：`gr_eternal` 在 M87\* 上，**機制已知的部分已修正；
+殘留一個真實但成因未知的系統性 under-coverage（約需 +11.8% 區間增寬）；
+不建議宣稱這個通道已完全校準，但目前沒有已知、可修正的具體 bug。**
+
+- **(a) 的修正是真實有效的**（X.19 / `16e2003`，coverage 0.800 → 0.839），
+  **不該因為它沒有解決全部問題而被懷疑**。
+- **十個候選全部以獨立證據處理完畢**，分五種證據等級：
+  配對實測（`nact` / `nlive` / `dlogz`）、程式碼核對（`sigma` 一致性）、
+  結構性論證（`n_pixels`）、模擬驗證（`position_angle` 環繞）、
+  算術上界（收斂選擇效應），另加凍結參數對照組＋N=200000 直接檢定
+  （計算機制）與網格細化掃描（`f_pix` 階梯效應）。**等級不同，不應混為一談。**
+- **缺口本身統計顯著**（合併 bootstrap p = 0.0035 / 0.0019），
+  但**沒有任何單一參數單獨顯著**。
+- **不建議繼續投入資源猜測新候選**，除非出現新的資訊來源
+  （例如 Sgr A\* 的獨立校準——它從未跑過這條路徑）。
+- **分類**：**已充分調查，收尾。** 殘留列為 image 通道已知但未解的限制。
+
+---
+
+### 以下為逐輪原始決策條目（I-6b – I-6n），保留供稽核
+
+
 
 這不是新的調查，是 I-6c/d/e 的合併狀態，獨立列出來是因為它現在**沒有候選解釋**。
 
