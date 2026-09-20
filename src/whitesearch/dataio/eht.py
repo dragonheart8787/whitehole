@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
@@ -51,6 +51,117 @@ EHT_2017_PARAMS = {
 
 #: Where the EHT instrument configuration lives, relative to the repo root.
 EHT_CONFIG_PATH = Path("configs/instruments/eht.yaml")
+
+
+#: Mean Earth radius [m].  The station array is built on a sphere rather than
+#: on a full geodetic ellipsoid: the closure relation this exists to guarantee
+#: is a property of the BASELINE ALGEBRA (u is a linear map of the baseline
+#: vector, and vectors close by construction), not of the Earth model, so the
+#: extra precision would buy nothing for it.
+EARTH_RADIUS_M = 6_371_000.0
+
+#: Declination used to project the default array, in degrees.  M87*'s, from
+#: ``configs/instruments/eht.yaml``.  The projection is linear in the baseline
+#: vector for ANY fixed (hour angle, declination), so this choice sets where
+#: the baselines land in the uv plane but cannot break closure.
+DEFAULT_DEC_DEG = 12.391
+DEFAULT_HOUR_ANGLE_HR = 0.0
+
+
+def eht_station_config() -> tuple[list[str], np.ndarray]:
+    """Station names and geocentric XYZ [m], from the instrument config.
+
+    Reads ``configs/instruments/eht.yaml`` -- the same single source of truth
+    the imaging grid comes from -- so the array is not a second in-code copy
+    that can drift from it (the failure mode audit X.13.2 records).
+    """
+    import yaml
+
+    for base in (Path.cwd(), Path(__file__).resolve().parents[3]):
+        path = base / EHT_CONFIG_PATH
+        if not path.exists():
+            continue
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        stations = cfg.get("stations")
+        if not stations:
+            raise KeyError(f"{path} has no 'stations' block")
+        names = sorted(stations)
+        lat = np.radians([float(stations[n]["latitude_deg"]) for n in names])
+        lon = np.radians([float(stations[n]["longitude_deg"]) for n in names])
+        xyz = EARTH_RADIUS_M * np.column_stack([
+            np.cos(lat) * np.cos(lon),
+            np.cos(lat) * np.sin(lon),
+            np.sin(lat),
+        ])
+        return names, xyz
+    raise FileNotFoundError(
+        f"EHT instrument config {EHT_CONFIG_PATH} not found; it is the single "
+        "source of truth for the station array."
+    )
+
+
+def eht_station_uv(
+    dec_deg: float = DEFAULT_DEC_DEG,
+    hour_angle_hr: float = DEFAULT_HOUR_ANGLE_HR,
+    freq_ghz: float = 230.0,
+) -> tuple[np.ndarray, list[tuple[int, int]], list[str]]:
+    """Derive (u, v) [Gλ] from the STATION ARRAY, one baseline per station pair.
+
+    Returns ``(uv, pairs, station_names)`` where ``pairs[b] = (i, j)`` names the
+    two stations of baseline ``b``.
+
+    This is what makes closure phases real (decision I-5).  The previous
+    ``_default_eht_uv()`` listed baselines directly, so no three of them formed
+    a triangle: ``u_ij + u_jk != u_ik``, and the "closure phase" computed from
+    them carried none of the station-gain invariance the observable exists for.
+    Here ``B_ij = X_i - X_j`` by construction, and the projection
+
+        u = ( sin H  Bx + cos H  By) / λ
+        v = (-sin δ cos H  Bx + sin δ sin H  By + cos δ  Bz) / λ
+
+    is LINEAR in ``B``, so ``u_ij + u_jk = u_ik`` holds exactly, for every
+    triangle, at machine precision.
+
+    KNOWN SIMPLIFICATION, recorded rather than silently tolerated: this is a
+    snapshot at a single hour angle with no elevation/visibility cut, so some
+    pairs would not in reality see the source simultaneously.  That affects
+    which baselines exist, not whether they close.
+    """
+    names, xyz = eht_station_config()
+    wavelength_m = 299_792_458.0 / (float(freq_ghz) * 1e9)
+    dec = np.radians(float(dec_deg))
+    ha = np.radians(float(hour_angle_hr) * 15.0)
+
+    pairs = [(i, j) for i in range(len(names)) for j in range(i + 1, len(names))]
+    b = np.array([xyz[i] - xyz[j] for i, j in pairs])
+    u = (np.sin(ha) * b[:, 0] + np.cos(ha) * b[:, 1]) / wavelength_m
+    v = (
+        -np.sin(dec) * np.cos(ha) * b[:, 0]
+        + np.sin(dec) * np.sin(ha) * b[:, 1]
+        + np.cos(dec) * b[:, 2]
+    ) / wavelength_m
+    return np.column_stack([u, v]) / 1e9, pairs, names
+
+
+def independent_triangles(n_stations: int) -> list[tuple[int, int, int]]:
+    """Independent closure triangles: every triple that contains station 0.
+
+    For N stations there are C(N,3) triangles but only (N-1)(N-2)/2 independent
+    ones; fixing a reference station picks exactly that many, so the likelihood
+    does not count the same phase information several times.
+    """
+    return [(0, j, k)
+            for j in range(1, n_stations)
+            for k in range(j + 1, n_stations)]
+
+
+def baseline_index(pairs: list[tuple[int, int]]) -> dict[tuple[int, int], int]:
+    """Map a station pair to its baseline row (both orderings)."""
+    idx: dict[tuple[int, int], int] = {}
+    for b, (i, j) in enumerate(pairs):
+        idx[(i, j)] = b
+        idx[(j, i)] = b
+    return idx
 
 
 def eht_imaging_config() -> dict[str, Any]:
@@ -172,33 +283,34 @@ class EHTLoader:
     @staticmethod
     def compute_closure_phases(
         visibilities: np.ndarray,
-        baseline_ids: np.ndarray,
+        baseline_pairs: Sequence[tuple[int, int]],
         station_list: list[str],
     ) -> dict[str, np.ndarray]:
-        """Compute closure phases for all independent triangles.
+        """Closure phases over independent station triangles (decision I-5).
 
-        Closure phase φ_{ijk} = arg(V_{ij}) + arg(V_{jk}) − arg(V_{ik})
-        is insensitive to station-based gain errors.
+        φ_ijk = arg(V_ij) + arg(V_jk) − arg(V_ik), which is invariant under any
+        per-station complex gain: g_i contributes +arg g_i − arg g_j to V_ij and
+        the three contributions cancel around the triangle.
 
-        Returns dict with 'triangles' (list of tuples) and 'closure_phases' (array).
+        FIXED IN I-5: this used to index ``visibilities`` by STATION number
+        (``phase_array[i]`` for station ``i``), but visibilities are per
+        BASELINE, so it read three unrelated baselines and the result was not a
+        closure phase at all.  ``baseline_pairs[b] = (i, j)`` now says which two
+        stations baseline ``b`` joins, and the lookup goes through that.
+
+        Returns ``{'triangles': [(name_i, name_j, name_k), ...],
+        'closure_phases': array}``.
         """
-        n_stations = len(station_list)
-        triangles = []
-        phases = []
-
+        index = baseline_index([(int(i), int(j)) for i, j in baseline_pairs])
         phase_array = np.angle(visibilities)
-        for i in range(n_stations - 2):
-            for j in range(i + 1, n_stations - 1):
-                for k in range(j + 1, n_stations):
-                    cp = phase_array[i] + phase_array[j] - phase_array[k]
-                    cp = (cp + np.pi) % (2 * np.pi) - np.pi  # wrap
-                    triangles.append((station_list[i], station_list[j], station_list[k]))
-                    phases.append(cp)
-
-        return {
-            "triangles": triangles,
-            "closure_phases": np.array(phases),
-        }
+        triangles, phases = [], []
+        for i, j, k in independent_triangles(len(station_list)):
+            cp = (phase_array[index[(i, j)]]
+                  + phase_array[index[(j, k)]]
+                  - phase_array[index[(i, k)]])
+            triangles.append((station_list[i], station_list[j], station_list[k]))
+            phases.append((cp + np.pi) % (2 * np.pi) - np.pi)
+        return {"triangles": triangles, "closure_phases": np.array(phases)}
 
     @staticmethod
     def compute_closure_amplitudes(
@@ -255,10 +367,11 @@ class EHTLoader:
         the same way when the source is not a known target.
         """
         canonical = resolve_target_name(target if target is not None else source)
-        from ..simulators.image_shadow import _default_eht_uv
 
         rng = np.random.default_rng(hash(f"{source}{year}{band}") % 2**32)
-        uv = _default_eht_uv()
+        # Decision I-5: the mock record now carries a real station array, so the
+        # closure phases computed from it are closure phases.
+        uv, station_pairs, station_names = eht_station_uv()
         n_baselines = len(uv)
 
         # Measured ring DIAMETERS: 42 muas for M87* (EHT 2019, ApJL 875 L1) and
@@ -294,6 +407,9 @@ class EHTLoader:
         return {
             "u": uv[:, 0],
             "v": uv[:, 1],
+            "uv_coverage": uv,
+            "station_pairs": station_pairs,
+            "stations": station_names,
             "visibilities": visibilities,
             "sigma": sigma,
             "freq_ghz": 230.0,

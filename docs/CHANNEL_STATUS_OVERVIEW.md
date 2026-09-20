@@ -126,7 +126,7 @@ SBC/coverage campaign 的通道。
 | **N=100 完整校準跑過兩輪**：修正模型樣板後（I-6c）coverage 平均 0.800 → 0.839，但仍未通過；**十個候選機制全部以獨立證據排除**，缺口經正式檢定確認統計顯著（bootstrap p = 0.0035 / 0.0019，所需增寬 +11.8%，95% CI [3.3%, 20.2%]）**但成因未知** | **已充分調查，收尾**；見 `GR_ETERNAL_COVERAGE_INVESTIGATION_POSTMORTEM.md` |
 | ~~`VisibilityLikelihood` 用**含雜訊**的 `sim_data.data` 當模型樣板~~ | **已修正**（X.19）。真值處 lnL 中位提高 +4.24，81% 的注入變好。**尚未重跑 campaign** |
 | `bh_accretion` 的振幅仍以峰值亮度參數化，先驗預測 19.3% 在 SNR > 10³ | **已回報、刻意未改**（見 I-7） |
-| `_compute_closure_phases()` 的三元組**不閉合**（`_default_eht_uv()` 是一串基線不是台站陣列），所以它是自洽的相位組合、不是具增益不變性的 closure phase。不造成推論偏差，但名不副實 | **已定性，回報未修**（見待決策 I-5） |
+| ~~`_compute_closure_phases()` 的三元組**不閉合**~~ **已修（X.32）**：uv 覆蓋改由 `configs/instruments/eht.yaml` 的八個台站推導（28 條基線、21 個獨立三角形），閉合殘差 1.78×10⁻¹⁵ Gλ，並以台站增益不變性實測驗證（新版 ≤1.78×10⁻¹⁵ rad，舊版最大 3.06 rad） | **已修**（見 I-5） |
 | **從未跑過任何 SBC**——上表是「條件已具備」，不是「已校準」；第一次嘗試已執行但未完成（I-6） | 待執行 |
 | 影像網格對薄環的響應**非單調**（3 px 0.1217、4 px 0.0003、5 px 0.9749），是取樣假影；現行網格下兩個目標都遠在下界之上，實務上不觸發 | **已定性但選擇不修** |
 | image 通道沒有 preprocess 模組 | **需要你做一個設計決定** |
@@ -263,19 +263,49 @@ SBC/coverage campaign 的通道。
   相位 8.67e−4 → **2.80 rad**（×3225）。診斷曾預測 0.571，實測 0.570。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.1、X.13.2。
 
-### I-5｜image｜closure phase 的三元組不閉合
+### I-5｜image｜EHT 台站陣列閉合關係 —— **已修（X.32）**
 
-- **問題**：`_compute_closure_phases()` 取可見度陣列的連續三個元素當三角形，
-  但 `_default_eht_uv()` 是一串基線而非台站陣列，**沒有任何一組滿足
-  u_ij + u_jk = u_ik**。所以它是相位組合而不是 closure phase，
-  不具備台站增益不變性。
-- **不造成推論偏差**：simulator 與 likelihood 用同一個函式，是資料的自洽
-  統計量。但若在報告中宣稱使用 closure phase，這一點必須說清楚。
-- **要決定的**：是否從 `configs/instruments/eht.yaml` 的台站座標推導 uv 覆蓋，
-  讓真正的三角形存在。
-- **分類**：**需要你做一個設計決定**。順帶已修：wrap 的 off-by-π
-  （`closure % 2π − π` 把零閉合映到 −π）。
-- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.13.4。
+- **原問題**：`_default_eht_uv()` 直接列出一串基線，**拓撲是錯的**——
+  那是「M 條獨立基線」不是「N 個台站」，沒有任何三條滿足
+  `u_ij + u_jk = u_ik`，所以 `_compute_closure_phases()` 算出來的
+  **不是 closure phase**，不具備台站增益不變性。
+- **修正**：新增 `dataio/eht.py::eht_station_uv()`，從
+  `configs/instruments/eht.yaml` 的**八個台站**（與成像網格同一個單一真實來源）
+  推導基線：經緯度 → 地心 XYZ → `B_ij = X_i − X_j`（向量差，
+  所以 `B_ij + B_jk = B_ik` 是恆等式）→ 投影到 uv。
+  **投影對 `B` 是線性的**，所以閉合關係原封不動傳遞，對任何固定 (H, δ) 都成立。
+
+| 量 | 值 |
+|---|---|
+| 台站 / 基線 / 獨立三角形 | 8 / **28** / **21** |
+| 最長基線 | 8.575 Gλ（地球直徑 / 1.3 mm ≈ 9.8 Gλ） |
+| **閉合殘差 `max\|u_ij + u_jk − u_ik\|`** | **1.776×10⁻¹⁵ Gλ**（機器精度） |
+
+- **真正的驗證是增益不變性，不是閉合本身**（閉合是必要條件，不是證明）。
+  對每個台站施加獨立複數增益 `V_ij → g_i conj(g_j) V_ij`
+  （log amp ~ N(0, 0.2)、φ ~ U(−π, π)），5 筆注入走完整模擬器路徑：
+
+  | | 新版（真三角形） | 舊版（連續三元組） |
+  |---|---|---|
+  | `max\|ΔCP\|` | **≤ 1.78×10⁻¹⁵ rad** | 最大 **3.0602 rad** |
+
+  同時量 `max\|Δ log\|V\|\| = 0.43–0.82`，**證明增益真的被施加了**——
+  沒有這一欄，閉合檢定可能因為增益根本沒生效而空洞地通過。
+- **一併修掉第二個 bug**：`EHTLoader.compute_closure_phases()` 用**台站**編號
+  去索引**逐基線**的 `visibilities` 陣列，讀了三條不相干的基線；
+  改成透過 `baseline_pairs` 查表。`_mock_eht_data()` 也改用台站陣列。
+- **amplitude-only 路徑：程式碼一行未改**，測試釘住「同樣基線進去、
+  逐位元相同的可見度出來」與「拿掉 closure metadata 後 lnL 不變」。
+  **但預設觀測資料改變了**：uv 覆蓋 16 → 28 條，所以新跑的 campaign 與存檔的
+  不同。X.18–X.31 全部跑在舊覆蓋上，它原封不動保留為 `_legacy_eht_uv()`，
+  傳進 `context["uv_coverage"]` 即可重現。這是修正拓撲無法避免的結果。
+- **fail-closed**：uv 是不知道台站配對的裸基線時，metadata 的
+  `closure_is_real: False` 明確記錄那不是 closure phase，不假裝。
+- **分類**：**已修，不再是待決策項目。** `use_closure_phases=True` 現在名副其實；
+  是否用它重跑校準是另一個決定。
+- **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.32（原問題記錄在 X.13.4）。
+  驗證：`tests/test_eht_closure_relation.py`、
+  `scripts/check_closure_gain_invariance.py`。
 
 ### I-6｜image｜SBC 的取樣成本 —— **振幅已改為總流量參數化，成本降到 11.9 h**
 

@@ -142,6 +142,17 @@ class VisibilityLikelihood(BaseLikelihood):
         # docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.8.1.
         model_context = dict(context)
         model_context["uv_coverage"] = self._require_uv_coverage(meta, context)
+        # Decision I-5: the station pairing travels with the coverage, so the
+        # model template's closure phases are taken over the SAME triangles as
+        # the observation's.  Without it the simulator would fall back to
+        # consecutive triplets and the two sides would close differently.
+        pairs = None
+        for src in (meta, context):
+            if isinstance(src, dict) and src.get("station_pairs") is not None:
+                pairs = src["station_pairs"]
+                break
+        if pairs is not None:
+            model_context["station_pairs"] = pairs
         # Same metadata-first, context-second resolution the GW likelihood uses
         # for per-event known quantities (t_merger, band edges), except that a
         # missing target raises instead of falling back: the target fixes the

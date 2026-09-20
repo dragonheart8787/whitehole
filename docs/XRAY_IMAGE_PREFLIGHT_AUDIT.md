@@ -3595,3 +3595,118 @@ M87\* 上 KS p = 0.0014、rank 平均 39.6，Sgr A\* 上 p = 0.1253、46.6。
 - `docs/calibration/image_gr_eternal_sgra_injections.csv`
 - `docs/calibration/image_gr_eternal_sgra_vs_m87_comparison.csv`
 - `docs/calibration/image_gr_eternal_sgra_significance.csv`
+
+---
+
+# X.32 EHT 台站陣列閉合關係修正（決策 I-5）
+
+X.13.4 記錄、I-5 列為待決策未修的問題：`_default_eht_uv()` 直接列出一串基線，
+**拓撲是錯的**——那是「M 條獨立基線」，不是「N 個台站」。
+沒有任何三條滿足 `u_ij + u_jk = u_ik`，所以
+`_compute_closure_phases()` 取連續三個元素算出來的東西
+**不是 closure phase**，不具備它存在的理由：台站增益不變性。
+
+## X.32.1 修正：從台站座標推導基線
+
+新增 `dataio/eht.py::eht_station_uv()`，從
+`configs/instruments/eht.yaml` 的**八個台站**（與成像網格同一個單一真實來源）
+推導基線：
+
+1. 台站經緯度 → 地心 XYZ（球形地球，`R = 6371 km`）。
+2. 基線向量 `B_ij = X_i − X_j`——**向量差，所以 `B_ij + B_jk = B_ik` 是恆等式**。
+3. 投影到 uv 平面：
+
+   ```
+   u = ( sin H · Bx + cos H · By) / λ
+   v = (−sin δ cos H · Bx + sin δ sin H · By + cos δ · Bz) / λ
+   ```
+
+**關鍵在於這個投影對 `B` 是線性的**，所以閉合關係原封不動地傳遞到 uv 平面，
+對**任何**固定的 (H, δ) 都成立。宣告的 δ（M87\* 的 +12.391°）
+只決定基線落在 uv 平面的哪裡，**不可能破壞閉合**。
+
+| 量 | 值 |
+|---|---|
+| 台站數 | 8（ALMA, APEX, IRAM30, JCMT, LMT, SMA, SMTO, SPT） |
+| 基線數 | **28**（= C(8,2)，舊版是 16 條手寫的） |
+| 獨立三角形 | **21**（= (N−1)(N−2)/2，固定參考台站） |
+| 最長基線 | **8.575 Gλ**（地球直徑 / 1.3 mm ≈ 9.8 Gλ，量級正確） |
+| **閉合殘差 `max\|u_ij + u_jk − u_ik\|`** | **1.776×10⁻¹⁵ Gλ**（機器精度） |
+
+**已知簡化，記錄而非默默容忍**：這是單一時角的快照，
+沒有做仰角／可見性篩選，所以有些台站對在現實中不會同時看到源。
+**那影響「哪些基線存在」，不影響「它們是否閉合」。**
+地球自轉沒有加進來——依要求，那不是讓台站配置有意義的最小必要條件。
+
+## X.32.2 真正的驗證：對台站增益不變
+
+**基線閉合是增益不變性的必要條件，但不等於證明了它。**
+直接施加真實陣列校準誤差會做的事——每個台站一個獨立的複數增益：
+
+```
+V_ij  →  g_i · conj(g_j) · V_ij ,   g = amp·e^{iφ},  log amp ~ N(0, 0.2),  φ ~ U(−π, π)
+```
+
+5 筆注入，經完整模擬器路徑：
+
+| seed | `max\|ΔCP\|` 新版（真三角形） | `max\|ΔCP\|` 舊版（連續三元組） | `max\|Δ log\|V\|\|` |
+|---|---|---|---|
+| 11 | **8.88×10⁻¹⁶** | 3.0602 | 0.7575 |
+| 22 | **1.78×10⁻¹⁵** | 2.9818 | 0.4251 |
+| 33 | **8.88×10⁻¹⁶** | 2.0341 | 0.8183 |
+| 44 | **4.44×10⁻¹⁶** | 2.3004 | 0.4778 |
+| 55 | **1.78×10⁻¹⁵** | 2.2850 | 0.6698 |
+
+**新版在機器精度內完全不動（最大 1.78×10⁻¹⁵ rad）；
+舊版最多變動 3.06 rad（接近 π）。**
+
+第三欄不是裝飾：`max|Δ log|V||` 落在 0.43–0.82，
+**證明增益真的被施加了**——沒有它，閉合檢定可能因為增益根本沒生效而空洞地通過。
+
+## X.32.3 一併修掉的第二個 bug：loader 用台站編號索引基線陣列
+
+`EHTLoader.compute_closure_phases()` 寫的是 `phase_array[i]`、`[j]`、`[k]`，
+其中 `i, j, k` 是**台站**編號——但 `visibilities` 是**逐基線**的。
+它因此讀了三條不相干的基線，算出來的同樣不是 closure phase。
+改成透過 `baseline_pairs[b] = (i, j)` 查表。
+`_mock_eht_data()` 也改成從台站陣列產生 uv，並在紀錄裡帶上
+`station_pairs` 與 `stations`。
+
+## X.32.4 amplitude-only 路徑不受影響（要求 4）
+
+**程式碼路徑完全沒動**：`_compute_visibilities` 與高斯振幅項一行未改。
+測試釘住「同樣的基線進去，逐位元相同的可見度出來」，
+以及「`use_closure_phases=False` 時，把 closure 相關的 metadata 全部拿掉，
+lnL 完全不變」。
+
+**但預設的觀測資料改變了，這一點必須講清楚**：
+預設 uv 覆蓋從 16 條變成 28 條，所以**新跑的 campaign 與存檔的不同**。
+X.18 – X.31 的每一個 campaign 都跑在舊覆蓋上，它**原封不動保留為
+`_legacy_eht_uv()`**，傳進 `context["uv_coverage"]` 即可重現。
+這不是意外的行為改變，是修正拓撲無法避免的結果——
+在一串不閉合的基線上不可能存在真正的三角形。
+
+## X.32.5 fail-closed：不假裝
+
+當 uv 覆蓋是一串不知道台站配對的裸基線時，`_array_for()` 回傳 `None`，
+closure 退回舊的連續三元組行為（讓既有呼叫者不致壞掉），
+而 metadata 的 **`closure_is_real: False`** 明確記錄那不是 closure phase。
+likelihood 會把 `station_pairs` 一起轉發進模型 context，
+所以模型樣板與觀測**用同一組三角形閉合**。
+
+## X.32.6 狀態
+
+**I-5 已修。** 這不再是待決策項目。
+`use_closure_phases=True` 現在名副其實；
+是否要用它重跑校準是另一個決定（見 X.32.7）。
+
+## X.32.7 產出
+
+- `src/whitesearch/dataio/eht.py`：`eht_station_config()`、`eht_station_uv()`、
+  `independent_triangles()`、`baseline_index()`；修正
+  `EHTLoader.compute_closure_phases()` 與 `_mock_eht_data()`
+- `src/whitesearch/simulators/image_shadow.py`：`_default_eht_uv()` 改為台站推導、
+  新增 `_legacy_eht_uv()`、`_compute_closure_phases()` 支援真三角形
+- `src/whitesearch/likelihoods/visibility.py`：轉發 `station_pairs`
+- `tests/test_eht_closure_relation.py`（14 個測試）
+- `scripts/check_closure_gain_invariance.py`

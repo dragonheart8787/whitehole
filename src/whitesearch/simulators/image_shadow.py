@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -501,8 +501,14 @@ class ImageShadowSimulator(BaseSimulator):
         # compares measured-with-noise against predicted-without.  Emitting only
         # the noisy one is what let VisibilityLikelihood use a noise-realised
         # template by accident -- see audit X.19.
-        closure_phases = _compute_closure_phases(visibilities)
-        closure_phases_signal = _compute_closure_phases(vis_signal)
+        # Decision I-5: closure phases are computed over REAL station
+        # triangles when the coverage comes from a station array.  When it does
+        # not, `pairs` is None, the fallback is a consecutive-triplet phase
+        # combination, and `closure_is_real` records that -- the value is not
+        # silently passed off as a closure phase.
+        pairs, triangles = _array_for(uv_coverage, context)
+        closure_phases = _compute_closure_phases(visibilities, triangles, pairs)
+        closure_phases_signal = _compute_closure_phases(vis_signal, triangles, pairs)
 
         return SimData(
             channel="image",
@@ -517,6 +523,12 @@ class ImageShadowSimulator(BaseSimulator):
                 "w_ring_muas": w_ring,
                 "thermal_noise_jy": thermal_noise_jy,
                 "closure_phases": closure_phases,
+                # Which stations each baseline joins, and the triangles the
+                # closure phases were taken over.  The likelihood forwards
+                # `station_pairs` so its model template closes the same way.
+                "station_pairs": pairs,
+                "closure_triangles": triangles,
+                "closure_is_real": pairs is not None,
                 # Noise-free counterparts of `data` / `closure_phases`: the
                 # model prediction, which is what a likelihood template needs.
                 "vis_signal": vis_signal,
@@ -538,43 +550,117 @@ class ImageShadowSimulator(BaseSimulator):
         )
 
 
-def _compute_closure_phases(visibilities: NDArray) -> NDArray:
-    """Phase closure statistic over sequential baseline triplets.
+def _station_array():
+    """``(uv [Gλ], station pairs, station names)`` for the default EHT array."""
+    from ..dataio.eht import eht_station_uv
 
-    KNOWN LIMITATION, recorded rather than silently tolerated: the triplets are
-    taken as consecutive entries of the visibility array, and the shipped
-    ``_default_eht_uv()`` baselines do not close -- for triplet 0,
-    ``(0.5, 0.2) + (0.5, -0.2) = (1.0, 0.0)``, not the third entry
-    ``(0.2, 0.5)``.  So this is a phase combination, not a closure phase, and
-    it does NOT carry the station-gain invariance closure phases exist for.
-    Both the simulator and the likelihood compute it with this same function,
-    so it is a self-consistent statistic of the data and does not bias
-    inference; it simply is not the robust observable its name claims.  Fixing
-    it means deriving the uv coverage from the station positions in
-    configs/instruments/eht.yaml so real triangles exist.  See
-    docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md X.13.4.
+    global _STATION_ARRAY_CACHE
+    if _STATION_ARRAY_CACHE is None:
+        _STATION_ARRAY_CACHE = eht_station_uv()
+    return _STATION_ARRAY_CACHE
 
-    The wrap below used to be ``closure % (2π) - π``, which maps a zero phase
-    closure to -π rather than to 0 -- a constant π offset from the convention
-    ``EHTLoader.compute_closure_phases`` uses.  The von Mises likelihood
-    compares model against data through this same function, so the offset
-    cancelled there, but the values stored in the observation metadata were
-    wrong by π.
+
+_STATION_ARRAY_CACHE = None
+
+
+def _baseline_index(pairs: Sequence[tuple[int, int]]) -> dict[tuple[int, int], int]:
+    idx: dict[tuple[int, int], int] = {}
+    for b, (i, j) in enumerate(pairs):
+        idx[(int(i), int(j))] = b
+        idx[(int(j), int(i))] = b
+    return idx
+
+
+def _array_for(uv_coverage: NDArray, context: dict) -> tuple:
+    """Station pairs and closure triangles matching this uv coverage, if known.
+
+    Returns ``(pairs, triangles)`` or ``(None, None)`` when the coverage is a
+    bare baseline list whose station pairing is unknown -- in which case no
+    real closure triangle exists and the caller must say so rather than
+    inventing one.
     """
-    n = len(visibilities)
-    n_triangles = n // 3
+    from ..dataio.eht import independent_triangles
+
+    pairs = context.get("station_pairs")
+    if pairs is None:
+        default_uv, default_pairs, names = _station_array()
+        if len(uv_coverage) == len(default_uv) and np.allclose(
+            uv_coverage, default_uv
+        ):
+            pairs = default_pairs
+        else:
+            return None, None
+    pairs = [(int(i), int(j)) for i, j in pairs]
+    n_stations = max(max(p) for p in pairs) + 1
+    return pairs, independent_triangles(n_stations)
+
+
+def _compute_closure_phases(
+    visibilities: NDArray,
+    triangles: Sequence[tuple[int, int, int]] | None = None,
+    pairs: Sequence[tuple[int, int]] | None = None,
+) -> NDArray:
+    """Closure phase over REAL station triangles: arg V_ij + arg V_jk - arg V_ik.
+
+    Fixed in decision I-5.  Previously the triplets were consecutive entries of
+    the visibility array and the shipped baselines did not close
+    (``(0.5, 0.2) + (0.5, -0.2) != (0.2, 0.5)``), so the result was a phase
+    combination that carried none of the station-gain invariance a closure
+    phase exists for.  Now the baselines come from a station array
+    (``dataio.eht.eht_station_uv``), so ``B_ij + B_jk = B_ik`` by construction
+    and this sum is invariant under any per-station complex gain: a gain
+    ``g_i`` contributes ``+arg g_i - arg g_j`` to ``V_ij``, and the three
+    contributions cancel exactly around the triangle.
+
+    ``triangles`` and ``pairs`` describe the array; when either is missing the
+    function falls back to the pre-I-5 consecutive-triplet behaviour so callers
+    holding a bare baseline list keep working, but that fallback is NOT a
+    closure phase and is marked as such by the caller's metadata.
+
+    The wrap maps a zero phase closure to 0, not to -pi (a constant pi offset
+    from ``EHTLoader.compute_closure_phases``' convention, which used to make
+    the stored metadata wrong by pi even though the likelihood cancelled it).
+    """
     phases = np.angle(visibilities)
-    closure = np.zeros(n_triangles)
-    for k in range(n_triangles):
-        i, j, l = 3 * k, 3 * k + 1, 3 * k + 2
-        closure[k] = phases[i] + phases[j] - phases[l]
-    return (closure + np.pi) % (2.0 * np.pi) - np.pi  # wrap to (-π, π]
+    if triangles is not None and pairs is not None:
+        index = _baseline_index(pairs)
+        closure = np.array([
+            phases[index[(i, j)]] + phases[index[(j, k)]] - phases[index[(i, k)]]
+            for i, j, k in triangles
+        ], dtype=float)
+    else:
+        n_triangles = len(visibilities) // 3
+        closure = np.array([
+            phases[3 * t] + phases[3 * t + 1] - phases[3 * t + 2]
+            for t in range(n_triangles)
+        ], dtype=float)
+    return (closure + np.pi) % (2.0 * np.pi) - np.pi  # wrap to (-pi, pi]
 
 
 def _default_eht_uv() -> NDArray:
-    """Return a toy EHT-like (u,v) coverage at 230 GHz [Gλ].
+    """Default (u, v) coverage [Gλ], derived from the 8-station EHT array.
 
-    Based on approximate SMTO-SMA-JCMT-IRAM EHT 2017 baselines.
+    Decision I-5: this used to be a hand-written list of 16 baselines, which
+    had the wrong TOPOLOGY -- a set of independent baselines, not an array of
+    stations -- so no three of them formed a triangle and the closure phases
+    computed from them were not closure phases.  It now returns the 28
+    baselines of the 8 stations in ``configs/instruments/eht.yaml``.
+
+    NOTE FOR REPRODUCING ARCHIVED CAMPAIGNS: this changes the default
+    observation.  Every campaign in audit X.18-X.31 ran on the old list, which
+    is preserved verbatim as :func:`_legacy_eht_uv`; pass it as
+    ``context["uv_coverage"]`` to reproduce them.  The amplitude code path
+    itself is unchanged -- same baselines in, bit-identical visibilities out.
+    """
+    return _station_array()[0]
+
+
+def _legacy_eht_uv() -> NDArray:
+    """The pre-I-5 hand-written baseline list, kept for reproducibility.
+
+    These 16 baselines do NOT close, so closure phases computed on them are a
+    self-consistent phase combination and nothing more.  Every archived
+    gr_eternal campaign (audit X.18-X.31) was run on this coverage.
     """
     return np.array([
         [0.5, 0.2], [0.5, -0.2], [0.2, 0.5], [0.2, -0.5],
