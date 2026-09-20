@@ -179,6 +179,11 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         "use_closure_phases": False,
         "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
         "cap_s": cap_s,
+        "n_baselines": int(len(data.metadata["uv_coverage"])),
+        # Decision I-5 provenance: which uv coverage this run used.  The
+        # default became the 28-baseline station array; every campaign in
+        # audit X.18-X.31 ran on the 16-baseline `_legacy_eht_uv()` list.
+        "closure_is_real": bool(data.metadata.get("closure_is_real", False)),
         "nact_requested": None if nact is None else int(nact),
         "dlogz_requested": None if dlogz is None else float(dlogz),
         "frozen_parameters": dict(frozen) if frozen else None,
