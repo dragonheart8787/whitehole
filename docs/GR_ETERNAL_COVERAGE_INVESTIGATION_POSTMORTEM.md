@@ -13,8 +13,8 @@ WhiteSearch 是一個 candidate ranking engine（候選訊號排序引擎），
 與 M87\* 的真實影像資料無關，也不是天文物理結論。
 
 **本文件是敘事與最終結論。** 逐輪的原始證據、完整數表與方法細節留在
-`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` 的 **X.18 – X.31**
-與 `docs/CHANNEL_STATUS_OVERVIEW.md` 的 **I-6b – I-6o**，
+`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` 的 **X.18 – X.33**
+與 `docs/CHANNEL_STATUS_OVERVIEW.md` 的 **I-6b – I-6p**，
 兩邊維持不變，本文件只標明出處，不複製細節。
 
 ---
@@ -399,6 +399,31 @@ SNR 越高越小，Sgr A\* 的 SNR 中位數高 2.6 倍）。
 
 ---
 
+## 調查基礎的事後檢查：新 uv 覆蓋（X.33）
+
+本 postmortem 的每一個數字都來自 **16 條基線**的 uv 覆蓋。
+I-5 修正（X.32）之後預設覆蓋變成 **28 條**（8 台站的真實拓撲），
+所以有一個合理的疑問：**這條調查的基礎會不會被覆蓋規模改變動搖？**
+
+X.33 用**同一批 18 筆注入**（真值逐筆完全相同，唯一變因是 uv 覆蓋）
+跑了 amplitude-only 的配對比較：
+
+| | 90% | 68% |
+|---|---|---|
+| 新 28 條 − 舊 16 條 | −0.0185，CI [−0.102, +0.074] | +0.0185，CI [−0.102, +0.139] |
+| 雙側 p | **0.753** | **0.821** |
+
+**兩種覆蓋在統計上無法區分**，而且兩個信賴水準的差異方向相反——
+雜訊該有的樣子。**本 postmortem 的結論不受 I-5 修正影響。**
+
+代價：耗時中位數 2.08 倍（N = 100 外推約 15.6 h）。
+
+一併記錄、未追查：`log10_total_flux_jy` 的 rank 偏移在新覆蓋下減弱
+（KS p 0.0026 → 0.2037），與 X.31 在 Sgr A\* 上看到的同一參數偏移消失呼應，
+兩處都與 (c) 的已記錄 SNR 依賴方向一致。
+
+---
+
 ## 給未來調查者的教訓
 
 每一條都對應到這次調查裡實際發生過的事，不是泛泛之談。
@@ -465,8 +490,8 @@ X.25.7 的「絕大部分缺口沒有被計算機制解釋掉」當時只有點�
 
 ## 出處
 
-- 逐輪原始證據與完整數表：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` **X.18 – X.31**
-- 決策條目與跨通道狀態：`docs/CHANNEL_STATUS_OVERVIEW.md` **I-6b – I-6o**
+- 逐輪原始證據與完整數表：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` **X.18 – X.33**
+- 決策條目與跨通道狀態：`docs/CHANNEL_STATUS_OVERVIEW.md` **I-6b – I-6p**
 - 原始數字（CSV）：`docs/calibration/image_gr_eternal_*.csv`
 - 存檔的 campaign：`artifacts/image_sbc_n20/`（X.18）、`artifacts/image_sbc_fixA/`（X.20）、
   `artifacts/image_sbc_nact8/`、`artifacts/image_sbc_nlive500/`、
