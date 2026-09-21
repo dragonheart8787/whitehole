@@ -202,9 +202,6 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         # Cumulative dynesty ncall: the behavioural evidence that a chain-length
         # change took effect, rather than the kwargs dict echoing the request.
         rec["ncall"] = int(res.metadata.get("num_likelihood_evaluations", 0))
-        # Behavioural provenance: what the likelihood actually did on its last
-        # call, not what the flag asked for.
-        rec["closure_config"] = dict(like.last_closure_config or {})
         rec["sampler_kwargs"] = {
             k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
             for k, v in res.metadata.get("sampler_kwargs", {}).items()
@@ -233,6 +230,11 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         rec["status"] = "error"
         rec["reason"] = f"{type(exc).__name__}: {exc}"
         rec["final"] = True
+    # Behavioural provenance: what the likelihood actually did on its last
+    # call, not what the flag asked for.  Recorded outside the success path so
+    # a capped or errored shard still carries it -- provenance must not depend
+    # on the run converging.
+    rec["closure_config"] = dict(getattr(like, "last_closure_config", None) or {})
     rec["wall_s"] = round(time.monotonic() - t0, 2)
     rec["cum_wall_s"] = round(cum + rec["wall_s"], 2)
     rec["n_shards"] = int(prior_rec.get("n_shards", 0)) + 1
