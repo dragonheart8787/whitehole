@@ -1,4 +1,7 @@
-"""image-channel gr_eternal SBC / coverage campaign, one injection per file.
+"""image-channel SBC / coverage campaign, one injection per file.
+
+``--model`` selects the hypothesis (``gr_eternal`` or ``bh_accretion``); the
+default stays ``gr_eternal`` so every archived campaign reproduces unchanged.
 
 Resumable by construction: each injection writes artifacts/image_sbc/<target>/
 inj_XXXX.json and an existing file is skipped.  This container suspends between
@@ -91,7 +94,9 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             cap_s: float = 1500.0, nact: int | None = None,
             dlogz: float | None = None,
             frozen: dict[str, float] | None = None,
-            use_closure: bool = False) -> dict:
+            use_closure: bool = False,
+            model_name: str = "gr_eternal",
+            seed_base: int = 700_000) -> dict:
     """Advance one injection by at most `timeout_s` of sampling.
 
     Injections are resumable: a shard that runs out of time leaves the record
@@ -115,10 +120,21 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             return prior_rec
         cum = float(prior_rec.get("cum_wall_s", 0.0))
 
-    seed = 700_000 + idx
+    # `seed_base` separates campaigns rather than just indices.  gr_eternal and
+    # bh_accretion share the first four ParameterSpecs (M, a_star, i,
+    # position_angle) with identical prior types, so the same seed would draw
+    # IDENTICAL geometry truths in both -- the two campaigns' coverage results
+    # would then not be independent, and the cross-model comparison would be
+    # paired without saying so.  Distinct bases keep them independent.
+    seed = seed_base + idx
     ctx = {**_default_context("image"), "target": target, "rng_seed": seed}
-    model = model_for_context("gr_eternal", ctx)
+    model = model_for_context(model_name, ctx)
     if brightness_prior is not None:
+        if model_name != "gr_eternal":
+            raise SystemExit(
+                "--brightness-prior re-bounds 'log10_total_flux_jy', which only "
+                f"{'gr_eternal'!r} samples; {model_name!r} has no such parameter."
+            )
         model = _override_brightness_prior(model, *brightness_prior)
     # Closure phases are opt-in.  Until decision I-5 was fixed (audit X.32) the
     # triplets did not close and no campaign could honestly claim to use them;
@@ -126,10 +142,10 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     # means what it says.  The choice is recorded per injection either way.
     if frozen:
         like = _FrozenParameterLikelihood(
-            "gr_eternal", frozen, use_closure_phases=use_closure
+            model_name, frozen, use_closure_phases=use_closure
         )
     else:
-        like = VisibilityLikelihood("gr_eternal", use_closure_phases=use_closure)
+        like = VisibilityLikelihood(model_name, use_closure_phases=use_closure)
     sim = get_simulator("image")
 
     rng = np.random.default_rng(seed)
@@ -141,6 +157,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         # Recorded as its own status rather than counted as a failure, so the
         # campaign's denominator stays honest.
         rec = {"idx": idx, "target": target, "seed": seed, "nlive": nlive,
+               "model": model_name, "seed_base": int(seed_base),
                "status": "unrepresentable", "reason": str(exc), "wall_s": 0.0,
                "cum_wall_s": 0.0, "final": True,
                "theta_true": {k: float(v) for k, v in theta.items()}}
@@ -171,6 +188,10 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     sig = np.abs(data.metadata["vis_signal"])
     rec: dict = {
         "idx": idx, "target": target, "seed": seed, "nlive": nlive,
+        # Which hypothesis was injected AND fit.  Recorded because the record
+        # schema is otherwise identical across models and the parameter names
+        # alone would have to be reverse-engineered from `ranks`.
+        "model": model_name, "seed_base": int(seed_base),
         "theta_true": {k: float(v) for k, v in theta.items()},
         "sampled_parameters": names,
         "r_ring_muas": float(data.metadata["r_ring_muas"]),
@@ -278,6 +299,12 @@ def main() -> None:
                     help="comma-separated injection indices to run, instead of "
                          "the --start/--n range")
     ap.add_argument("--outroot", default="artifacts/image_sbc")
+    ap.add_argument("--model", default="gr_eternal",
+                    choices=["gr_eternal", "bh_accretion"],
+                    help="which image-channel hypothesis to inject and fit")
+    ap.add_argument("--seed-base", dest="seed_base", type=int, default=700_000,
+                    help="seed = seed_base + idx; use a distinct base per "
+                         "campaign so different models draw independent truths")
     a = ap.parse_args()
 
     frozen = None
@@ -300,7 +327,8 @@ def main() -> None:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
         r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt,
-                    bp, a.cap, a.nact, a.dlogz, frozen, a.closure)
+                    bp, a.cap, a.nact, a.dlogz, frozen, a.closure,
+                    a.model, a.seed_base)
         done += 1
         print(
             f"[{i:04d}] {r['status']:15s} cum={r.get('cum_wall_s', 0):7.1f}s "

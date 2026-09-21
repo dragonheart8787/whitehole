@@ -20,6 +20,8 @@ import numpy as np
 from scipy.optimize import brentq
 from scipy.stats import binomtest, combine_pvalues, norm
 
+#: Default parameter vector (gr_eternal).  ``--params`` overrides it so the
+#: same test runs on bh_accretion, whose emission parameters differ.
 PARAMS = ["M", "a_star", "i", "position_angle", "ring_width_frac",
           "log10_total_flux_jy"]
 # Finite-L reference for this credible-interval estimator, measured in X.25 at
@@ -46,7 +48,15 @@ def main() -> None:
     ap.add_argument("--archive", default="artifacts/image_sbc_fixA/M87star")
     ap.add_argument("--out",
                     default="docs/calibration/image_gr_eternal_coverage_significance.csv")
+    ap.add_argument("--params", default=None,
+                    help="comma-separated parameter names; default is "
+                         "gr_eternal's vector. The Bonferroni factor and the "
+                         "per-injection denominator follow this list.")
     a = ap.parse_args()
+
+    global PARAMS
+    if a.params:
+        PARAMS = [x.strip() for x in a.params.split(",") if x.strip()]
 
     recs = [json.loads(p.read_text())
             for p in sorted(Path(a.archive).glob("inj_*.json"))]
@@ -59,18 +69,19 @@ def main() -> None:
     for level, ref in REFERENCE.items():
         print(f"===== nominal {level}%  (reference {ref:.4f}) =====")
         print(f"{'param':>20} {'hits':>8} {'coverage':>9} "
-              f"{'p(1-sided)':>11} {'Bonf x6':>9}")
+              f"{'p(1-sided)':>11} {'Bonf x'+str(len(PARAMS)):>9}")
         per_p, mat = [], np.zeros((n, len(PARAMS)), int)
         for j, p in enumerate(PARAMS):
             mat[:, j] = [covered(r, p, level) for r in ok]
             k = int(mat[:, j].sum())
             pv = binomtest(k, n, ref, alternative="less").pvalue
             per_p.append(pv)
+            nb = len(PARAMS)
             rows.append({"level": level, "scope": p, "hits": k, "n": n,
                          "coverage": k / n, "reference": ref, "p_value": pv,
-                         "p_bonferroni": min(1.0, 6 * pv), "method": "binomial"})
+                         "p_bonferroni": min(1.0, nb * pv), "method": "binomial"})
             print(f"{p:>20} {k:>5}/{n:<3} {k/n:>9.3f} {pv:>11.4f} "
-                  f"{min(1.0, 6*pv):>9.4f}")
+                  f"{min(1.0, nb*pv):>9.4f}")
 
         tot = mat.sum(axis=1)
         obs_mean, expected = tot.mean(), len(PARAMS) * ref
