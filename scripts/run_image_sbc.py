@@ -90,7 +90,8 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             brightness_prior: tuple[float, float] | None = None,
             cap_s: float = 1500.0, nact: int | None = None,
             dlogz: float | None = None,
-            frozen: dict[str, float] | None = None) -> dict:
+            frozen: dict[str, float] | None = None,
+            use_closure: bool = False) -> dict:
     """Advance one injection by at most `timeout_s` of sampling.
 
     Injections are resumable: a shard that runs out of time leaves the record
@@ -119,15 +120,16 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     model = model_for_context("gr_eternal", ctx)
     if brightness_prior is not None:
         model = _override_brightness_prior(model, *brightness_prior)
-    # amplitude-only, declared explicitly: the closure-phase triplets in
-    # _default_eht_uv() do not close (audit X.13.4 / decision I-5), so this
-    # campaign must not claim to use closure phases.
+    # Closure phases are opt-in.  Until decision I-5 was fixed (audit X.32) the
+    # triplets did not close and no campaign could honestly claim to use them;
+    # the default coverage is now a real station array, so `use_closure=True`
+    # means what it says.  The choice is recorded per injection either way.
     if frozen:
         like = _FrozenParameterLikelihood(
-            "gr_eternal", frozen, use_closure_phases=False
+            "gr_eternal", frozen, use_closure_phases=use_closure
         )
     else:
-        like = VisibilityLikelihood("gr_eternal", use_closure_phases=False)
+        like = VisibilityLikelihood("gr_eternal", use_closure_phases=use_closure)
     sim = get_simulator("image")
 
     rng = np.random.default_rng(seed)
@@ -176,7 +178,7 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             data.metadata["image"].sum() * (2 * ctx["fov_muas"] / ctx["n_pixels"]) ** 2
         ),
         "network_snr": float(np.sqrt(((sig / ctx["thermal_noise_jy"]) ** 2).sum())),
-        "use_closure_phases": False,
+        "use_closure_phases": bool(use_closure),
         "brightness_prior_override": list(brightness_prior) if brightness_prior else None,
         "cap_s": cap_s,
         "n_baselines": int(len(data.metadata["uv_coverage"])),
@@ -200,6 +202,9 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
         # Cumulative dynesty ncall: the behavioural evidence that a chain-length
         # change took effect, rather than the kwargs dict echoing the request.
         rec["ncall"] = int(res.metadata.get("num_likelihood_evaluations", 0))
+        # Behavioural provenance: what the likelihood actually did on its last
+        # call, not what the flag asked for.
+        rec["closure_config"] = dict(like.last_closure_config or {})
         rec["sampler_kwargs"] = {
             k: (v if isinstance(v, (int, float, str, bool, type(None))) else str(v))
             for k, v in res.metadata.get("sampler_kwargs", {}).items()
@@ -262,6 +267,8 @@ def main() -> None:
     ap.add_argument("--dlogz", type=float, default=None,
                     help="dynesty stopping threshold on remaining evidence; "
                          "default None keeps BilbyRunner's dlogz=0.1")
+    ap.add_argument("--closure", action="store_true",
+                    help="use closure phases as well as amplitudes (decision I-5)")
     ap.add_argument("--freeze", default=None,
                     help="DIAGNOSTIC 'name=value' -- the likelihood ignores this "
                          "parameter, so its posterior must equal its prior")
@@ -291,7 +298,7 @@ def main() -> None:
             print(f"SHARD-BUDGET-STOP after {done} injections", flush=True)
             break
         r = run_one(i, a.target, a.nlive, a.timeout, outdir, a.checkpoint_dt,
-                    bp, a.cap, a.nact, a.dlogz, frozen)
+                    bp, a.cap, a.nact, a.dlogz, frozen, a.closure)
         done += 1
         print(
             f"[{i:04d}] {r['status']:15s} cum={r.get('cum_wall_s', 0):7.1f}s "
