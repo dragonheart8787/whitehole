@@ -88,6 +88,55 @@ class _FrozenParameterLikelihood(VisibilityLikelihood):
         return super().loglike({**theta, **self.frozen}, data, context)
 
 
+def _dynesty_state_at_cap(outdir: Path, label: str) -> dict:
+    """Read dynesty's internal state out of bilby's resume checkpoint.
+
+    A record written at the cap has no posterior and no dynesty numbers, so
+    "why did this one not finish" was previously unanswerable from the archive.
+    The checkpoint has it.  ``dlogz_remaining`` is the one that matters: it is
+    what dynesty's own stopping rule compares against ``dlogz``, so it says
+    whether more wall-clock would have finished the run or not.
+
+    Best-effort by construction -- a missing or half-written checkpoint returns
+    a reason rather than raising, because this is diagnostics attached to an
+    already-closed record and must never turn a capped run into a crash.
+    """
+    path = outdir / "bilby" / f"{label}_resume.pickle"
+    if not path.exists():
+        return {"available": False, "reason": "no resume checkpoint"}
+    try:
+        import pickle
+
+        with path.open("rb") as fh:
+            sampler = pickle.load(fh)[0]
+        ncall = sampler.ncall
+        out = {
+            "available": True,
+            "it": int(getattr(sampler, "it", -1)),
+            "ncall": int(np.sum(ncall)) if np.ndim(ncall) else int(ncall),
+            "nlive": int(getattr(sampler, "nlive", -1)),
+            "eff_percent": float(getattr(sampler, "eff", float("nan"))),
+            "nbound": int(getattr(sampler, "nbound", -1)),
+        }
+        d = sampler.saved_run.D
+        logz = np.asarray(d["logz"])
+        logvol = np.asarray(d["logvol"])
+        logl_max_live = float(np.max(sampler.live_logl))
+        # dynesty's remaining-evidence estimate: the best case still to come is
+        # the highest live logl filling the whole remaining prior volume.
+        out["logz"] = float(logz[-1])
+        out["logz_err"] = float(np.sqrt(d["logzvar"][-1]))
+        out["dlogz_remaining"] = float(
+            np.logaddexp(logz[-1], logl_max_live + logvol[-1]) - logz[-1]
+        )
+        out["logl_max_live"] = logl_max_live
+        out["logl_last_dead"] = float(np.asarray(d["logl"])[-1])
+        out["n_saved"] = int(len(logz))
+        return out
+    except Exception as exc:  # noqa: BLE001 - diagnostics, never fatal
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
             checkpoint_dt: float = 45.0,
             brightness_prior: tuple[float, float] | None = None,
@@ -213,8 +262,8 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     }
 
     t0 = time.monotonic()
+    label = f"img_{target.replace(chr(42), 'star')}_{idx:04d}"
     try:
-        label = f"img_{target.replace(chr(42), 'star')}_{idx:04d}"
         res = runner.run(like, data, ctx, model, label=label)
         post = res.posterior
         rec["status"] = "ok"
@@ -261,9 +310,13 @@ def run_one(idx: int, target: str, nlive: int, timeout_s: float, outdir: Path,
     rec["n_shards"] = int(prior_rec.get("n_shards", 0)) + 1
     if not rec["final"] and rec["cum_wall_s"] >= cap_s:
         # Spent its whole allowance without converging; close it so the
-        # campaign moves on and the denominator stays honest.
+        # campaign moves on and the denominator stays honest.  Record what
+        # dynesty had reached, so a cap is a measurement rather than just an
+        # absence -- X.35 could only answer "how far off was it?" by reading
+        # the checkpoints afterwards.
         rec["status"] = "timeout_capped"
         rec["final"] = True
+        rec["dynesty_state_at_cap"] = _dynesty_state_at_cap(outdir, label)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rec, indent=1))
