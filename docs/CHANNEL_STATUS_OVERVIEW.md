@@ -353,6 +353,17 @@ SBC/coverage campaign 的通道。
   CPU 競爭改變的是牆鐘不是取樣路徑）。每筆都標記 `reused_from` 與
   `timing_contended`，**耗時報告會把重用與新跑的分開**。
   剩餘 78 筆，估計約 46 h。
+- **X.37 更正（campaign 進行 11 h 時發現）**：吞吐量差異**不只是**可避免的 CPU 競爭。
+  campaign 在**無競爭**、BLAS 保護已驗證無害（完整取樣迴圈 A/B：
+  1 執行緒 93.3 對 3 執行緒 92.8 calls/s）的情況下，跑出與 pilot 同一個速率
+  （115 對補測 172 calls/s，又是 1.49 倍）。主機速度量到約 10%
+  （本容器裸基準 132 對 X.37 容器 146 calls/s）。
+  **較簡約的解釋是補測落在較快的主機上**；吞吐量會隨容器實例變動，
+  **X.37「一次性巧合、非系統性風險」的結論錯了**。
+  不影響 SBC 有效性，但影響撞上限：idx 0（SNR 7029）在 12000 s 被 cap，
+  `dlogz_remaining` 0.145（目標 0.1）。耗時估計 **46 h → 約 62 h**，
+  仍在 80–90 h 門檻內，campaign 繼續。**上限政策未更動，待決定。**
+  細節：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md`「X.37 更正」。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.3、X.13.5。
 
 ### I-2｜image｜環半徑要不要重新參數化 —— **已完成**
