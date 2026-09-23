@@ -320,8 +320,39 @@ SBC/coverage campaign 的通道。
     高兩個區間來自乾淨的補測）。
   - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.37。原始數字：
     `docs/calibration/image_throughput_diagnosis.csv`。
-- **完整 N=100 campaign（約 54–60 h 量級）目前仍未開跑**，
-  等你看過 X.37 的診斷結論後決定。
+- **BLAS 執行緒保護已加上（X.38）：操作性修正，不影響任何統計邏輯。**
+  - `run_image_sbc.py`（campaign harness）與五支可能在 campaign 期間旁側執行的
+    腳本（`analyse_image_sbc` / `image_sbc_status` /
+    `test_coverage_significance` / `analyse_sampler_pilot` /
+    `diagnose_throughput`）在**匯入 numpy 之前**設定
+    `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` /
+    `NUMEXPR_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` = 1。
+    用 `setdefault` 而非指派，外層明確設定仍然優先。
+    OpenBLAS/MKL 在載入時讀這些變數，所以 `import numpy` 之後才設就太遲了。
+  - **行為驗證（不只看環境變數有沒有設）**：
+    `diagnose_throughput.py --verify-blas` 量 matmul 的 CPU/wall 比值。
+
+    | | 使用核心數 |
+    |---|---|
+    | 加保護後 | **1.00** |
+    | 對照組（外層覆寫為 4） | **3.95** |
+    | X.37 未加保護時 | 3.92 |
+
+    另有結構性檢查：保護區塊在六支腳本裡都**文字上早於**第一個
+    numpy/whitesearch 匯入。
+  - **確認不拖慢 campaign**：同時段來回 A/B，加保護 **142.1** calls/s
+    對未加保護 **142.9**，差 **0.6%（雜訊範圍內）**。
+    （先前一次跨時段比較看似慢 2.9%，是時間漂移不是保護機制造成的。）
+  - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.38。
+- **完整 N=100 campaign 已開跑（X.39）**，分層預算
+  （SNR < 100 用 cap 3000 s、SNR ≥ 100 用 cap 12000 s），
+  沿用 X.36 的耗時估計邏輯。
+  **重用 22 筆已收斂的注入**（pilot 的 SNR<100 群與補測的 SNR≥100 群，
+  seed base、nlive、nact、dlogz、uv 覆蓋、amplitude-only 全部與本 campaign
+  相同，所以它們本來就是合格的 campaign 記錄；dynesty 給定 seed 是決定性的，
+  CPU 競爭改變的是牆鐘不是取樣路徑）。每筆都標記 `reused_from` 與
+  `timing_contended`，**耗時報告會把重用與新跑的分開**。
+  剩餘 78 筆，估計約 46 h。
 - **細節**：`docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md` X.12.3、X.13.5。
 
 ### I-2｜image｜環半徑要不要重新參數化 —— **已完成**

@@ -13,6 +13,25 @@ likelihood), because dynesty's own maxcall is overwritten by bilby.
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# BLAS thread guard -- MUST run before numpy is imported.
+#
+# X.37 traced the 1.49x throughput discrepancy between the bh_accretion pilot
+# and the high-SNR retest to CPU oversubscription inside the VM: numpy's BLAS
+# is unbounded and takes all 4 cores (measured 3.92), while the sampler's
+# likelihood is single-threaded (measured 1.00).  One numpy-heavy script run
+# alongside a campaign is therefore enough to starve it and corrupt the timing
+# record.  OpenBLAS/MKL read these at load time, so setting them after
+# `import numpy` would be too late.
+#
+# setdefault, not assignment: an explicit outer setting still wins.
+# ---------------------------------------------------------------------------
+import os as _os
+
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_v, "1")
+
 import argparse, json, os, time
 from pathlib import Path
 

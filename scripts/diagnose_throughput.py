@@ -14,6 +14,25 @@ host shows up as steal, which is a cause NOTHING in this repository can fix.
 """
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# BLAS thread guard -- MUST run before numpy is imported.
+#
+# X.37 traced the 1.49x throughput discrepancy between the bh_accretion pilot
+# and the high-SNR retest to CPU oversubscription inside the VM: numpy's BLAS
+# is unbounded and takes all 4 cores (measured 3.92), while the sampler's
+# likelihood is single-threaded (measured 1.00).  One numpy-heavy script run
+# alongside a campaign is therefore enough to starve it and corrupt the timing
+# record.  OpenBLAS/MKL read these at load time, so setting them after
+# `import numpy` would be too late.
+#
+# setdefault, not assignment: an explicit outer setting still wins.
+# ---------------------------------------------------------------------------
+import os as _os
+
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    _os.environ.setdefault(_v, "1")
+
 import argparse, json, os, time
 from pathlib import Path
 
@@ -32,6 +51,32 @@ def cpu_times() -> tuple[float, float]:
     parts = Path("/proc/stat").read_text().split("\n")[0].split()[1:]
     v = [float(x) for x in parts]
     return sum(v), (v[7] if len(v) > 7 else 0.0)
+
+
+def verify_blas_threads() -> dict:
+    """Behavioural check that the thread guard took effect (lesson 1).
+
+    Setting an environment variable is not evidence that BLAS honoured it --
+    the same trap as `walks` being echoed back while doing nothing (K.2.1).
+    The evidence is CPU time over wall time on a matmul big enough to thread:
+    unbounded BLAS on this 4-core box measured 3.92 cores in X.37, so a guarded
+    process must come back at ~1.0.
+    """
+    import numpy as _np
+
+    a = _np.random.rand(1500, 1500)
+    a @ a                                     # warm up the BLAS thread pool
+    t0, c0 = time.monotonic(), time.process_time()
+    for _ in range(6):
+        a @ a
+    wall, cpu = time.monotonic() - t0, time.process_time() - c0
+    return {
+        "env": {v: os.environ.get(v) for v in
+                ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")},
+        "matmul_wall_s": wall, "matmul_cpu_s": cpu,
+        "cores_used": cpu / wall,
+    }
 
 
 def bench(idx: int, seed_base: int, seconds: float, model_name: str) -> dict:
@@ -85,7 +130,19 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=60.0)
     ap.add_argument("--tag", default="clean")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--verify-blas", dest="verify_blas", action="store_true",
+                    help="check the thread guard behaviourally and exit")
     a = ap.parse_args()
+
+    if a.verify_blas:
+        v = verify_blas_threads()
+        print("env:", v["env"])
+        print(f"matmul 1500x1500 x6: wall {v['matmul_wall_s']:.2f}s  "
+              f"cpu {v['matmul_cpu_s']:.2f}s  -> {v['cores_used']:.2f} cores used")
+        print(f"X.37 measured 3.92 cores unguarded on this 4-core box.")
+        ok = v["cores_used"] < 1.25
+        print("GUARD", "EFFECTIVE" if ok else "NOT EFFECTIVE")
+        raise SystemExit(0 if ok else 1)
 
     print(f"[{a.tag}] loadavg={Path('/proc/loadavg').read_text().split()[0]} "
           f"nproc={os.cpu_count()}")
