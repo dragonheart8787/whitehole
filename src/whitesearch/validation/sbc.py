@@ -41,7 +41,8 @@ class SBCResult:
     n_simulations : int
         Number of prior-predictive simulations.
     uniformity_pvalues : dict[str, float]
-        Kolmogorov-Smirnov p-values for rank uniformity (per parameter).
+        One-sample Kolmogorov-Smirnov p-values for rank uniformity, per
+        parameter.  Deterministic: the same ranks always give the same value.
     calibrated : dict[str, bool]
         True if KS p-value > 0.05 (passes SBC at 5% level).
     """
@@ -62,11 +63,27 @@ class SBCResult:
                 self.calibrated[param] = False
                 continue
             ranks_arr = np.array(rank_list, dtype=float)
-            # KS test against Uniform(0, L)
-            uniform_samples = np.random.uniform(0, self.n_posterior_samples, len(ranks_arr))
-            ks_stat, pval = stats.ks_2samp(ranks_arr, uniform_samples)
+            # One-sample KS against the theoretical Uniform(0, 1) CDF.
+            #
+            # The previous implementation drew a fresh unseeded
+            # np.random.uniform() comparison sample and ran ks_2samp against
+            # it, so the same ranks gave a different p-value on every call
+            # (observed: 0.628 / 0.628 / 0.328 / 0.112 / 0.866 across five
+            # calls on one rank set) and `calibrated` was a coin flip near the
+            # 0.05 threshold.  It was also the weaker test: comparing against
+            # the known CDF uses all the information a two-sample test throws
+            # away.
+            #
+            # SBCRunner ranks each true value against L = n_posterior_samples
+            # thinned posterior draws, so a rank is an integer in {0, ..., L}:
+            # L + 1 possible outcomes.  (r + 0.5) / (L + 1) is the standard
+            # continuity correction mapping those onto (0, 1), centring each
+            # discrete outcome in its 1/(L+1)-wide cell.
+            denom = float(self.n_posterior_samples) + 1.0
+            u = (ranks_arr + 0.5) / denom
+            ks_stat, pval = stats.kstest(u, "uniform")
             self.uniformity_pvalues[param] = float(pval)
-            self.calibrated[param] = pval > 0.05
+            self.calibrated[param] = bool(pval > 0.05)
 
     def summary(self) -> pd.DataFrame:
         rows = []

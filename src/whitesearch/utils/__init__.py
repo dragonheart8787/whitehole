@@ -6,6 +6,7 @@ from .math_utils import (  # noqa: F401
     estimate_psd,
     ringdown_waveform,
     kerr_qnm_frequency,
+    kerr_shadow_radius_rg,
     dm_delay_ms,
     apply_dm_dispersion,
     scatter_broaden,

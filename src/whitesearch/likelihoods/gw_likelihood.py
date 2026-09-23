@@ -19,7 +19,15 @@ from ..utils.math_utils import (
     ringdown_waveform,
     kerr_qnm_frequency,
 )
-from ..utils.constants import G, C, M_SUN, MPC_M
+from ..utils.constants import (
+    G,
+    C,
+    M_SUN,
+    MPC_M,
+    BOUNCE_BURST_FREQ_FACTOR,
+    BOUNCE_BURST_Q_FACTOR,
+    BOUNCE_BURST_Q_MIN,
+)
 
 # Soft floor instead of -inf for dynesty stability.  Must sit BELOW any
 # genuine in-band log-likelihood so template-rejected points rank worst:
@@ -42,6 +50,56 @@ HH_MIN = 1e-30
 # gw_units.py for why no additional power-compensation factor is applied.
 TAPER_ALPHA = 0.1
 
+# Taper is a correction for ONE specific defect: a full-segment rectangular-window
+# rfft analysed against a PSD estimated by Welch (short, Hann-windowed segments).
+# The two disagree about spectral leakage, and on real strain that mismatch
+# inflates noise-weighted inner products near the band edges.  Data whose PSD is
+# the exact analytic spectrum its noise was generated from has no such mismatch:
+# the mock simulator fills rfft bins directly and irffts them, so at
+# taper_alpha = 0 its spectrum is diagonal by construction (measured per-bin
+# <n|n> = 1.96-2.05 against a theory value of 2.0).  Applying the taper there
+# CREATES the problem it was meant to fix: the time-domain window convolves in
+# frequency and smears the 20-60 Hz seismic wall of aligo_psd_analytic() -- which
+# spans ~20 decades inside the analysis band -- across 100-1700 Hz, inflating
+# per-bin <n|n> to 5.8e6-1.3e8 and displacing the likelihood maximum of a loud
+# injection by 100+ carrier periods.  See docs/BOUNCE_PREFLIGHT_AUDIT.md Part H.
+#
+# So the taper follows the data's PSD provenance, not a global constant.  The
+# discriminator is the existing ``source`` provenance field carried in the GW
+# observation metadata (dataio/gw_observation.py, dataio/gwosc.py).
+TAPER_ALPHA_NONE = 0.0
+
+# Sources whose PSD is the generative spectrum on the same un-windowed basis as
+# the analysis rfft.  Everything else -- GWOSC strain, and mock strain that has
+# been through GWPreprocessor's bandpass/notch/Welch pipeline (source
+# MOCK_EXPLICIT, MOCK, MOCK_FALLBACK) -- carries a Welch-estimated PSD and needs
+# the taper exactly as before.  Measured for MOCK_EXPLICIT: per-bin <d|d> is
+# 3.4e9 at taper 0.0 versus 9.9 at taper 0.1, so preprocessed mock belongs with
+# real data, not with the raw simulator.
+NO_TAPER_SOURCES = frozenset({"MOCK_SIMULATOR"})
+
+# Recorded verbatim in the run metadata so the choice is never invisible.
+TAPER_REASON_GENERATIVE_PSD = (
+    "source_psd_is_generative_no_window_mismatch"
+)
+TAPER_REASON_WELCH_PSD = "source_psd_is_welch_estimated_window_mismatch"
+TAPER_REASON_UNKNOWN_SOURCE = "source_absent_default_to_real_data_convention"
+
+
+def taper_for_source(source: str | None) -> tuple[float, str]:
+    """Return ``(taper_alpha, reason)`` for a GW observation's ``source`` tag.
+
+    An absent or unrecognised ``source`` keeps the real-data convention
+    (``TAPER_ALPHA``): every caller that predates this branch is unaffected,
+    and a new data path has to opt in explicitly to skip the taper rather
+    than inheriting the skip by omission.
+    """
+    if source is None:
+        return TAPER_ALPHA, TAPER_REASON_UNKNOWN_SOURCE
+    if str(source) in NO_TAPER_SOURCES:
+        return TAPER_ALPHA_NONE, TAPER_REASON_GENERATIVE_PSD
+    return TAPER_ALPHA, TAPER_REASON_WELCH_PSD
+
 
 class GWLikelihood(BaseLikelihood):
     """Frequency-domain GW likelihood for bounce / BH ringdown / null."""
@@ -55,18 +113,50 @@ class GWLikelihood(BaseLikelihood):
         self.model_name = model_name
         self.use_full = use_full_likelihood
         self.ll_min = ll_min
+        # Provenance of the most recent evaluation's taper choice.  Populated
+        # by every loglike() call and copied into run metadata by the
+        # inference runners, so "this run skipped the taper because the data
+        # was mock" is always visible in the record.
+        self.last_taper_config: dict[str, Any] = {}
 
     @property
     def parameter_names(self) -> list[str]:
         if self.model_name == "null":
             return []
         if self.model_name == "bounce":
+            # log10_dt_bounce_s (the burst delay measured from the merger) and
+            # log10_A_bounce are both sampled.  log10_tau_bounce_yr -- the
+            # cosmological BH lifetime -- is NOT: it is a different physical
+            # quantity that no observable strain segment constrains.  See
+            # docs/BOUNCE_PREFLIGHT_AUDIT.md sections B.3 and D.1.
             return [
                 "M", "a_star", "eps_f", "eps_Q",
-                "log10_A_bounce", "log10_tau_bounce_yr",
+                "log10_A_bounce", "log10_dt_bounce_s",
                 "D_L", "i",
             ]
-        return ["M", "a_star", "log10_A", "D_L", "i"]
+        # bh_ringdown (and any other non-bounce GW model routed here) is a
+        # phenomenological ringdown: the template amplitude is the free
+        # log10_A used by _build_template() below.  D_L and i used to be
+        # listed here but never entered the bh_ringdown template, so the
+        # sampler explored two parameters the likelihood was flat in.
+        return ["M", "a_star", "log10_A"]
+
+    def taper_config(self, data: Any) -> dict[str, Any]:
+        """Resolve the taper for ``data`` from its ``source`` provenance tag.
+
+        Returns the audit record written into run metadata:
+        ``data_source``, ``taper_alpha_used``, ``taper_alpha_reason``.
+        """
+        meta = data.metadata if hasattr(data, "metadata") else data
+        source = None
+        if isinstance(meta, dict):
+            source = meta.get("source")
+        alpha, reason = taper_for_source(source)
+        return {
+            "data_source": source,
+            "taper_alpha_used": float(alpha),
+            "taper_alpha_reason": reason,
+        }
 
     def loglike(
         self,
@@ -84,9 +174,13 @@ class GWLikelihood(BaseLikelihood):
         except (KeyError, AttributeError, ValueError) as exc:
             return self.ll_min
 
+        taper_cfg = self.taper_config(data)
+        self.last_taper_config = taper_cfg
+        taper_alpha = taper_cfg["taper_alpha_used"]
+
         n = len(strain)
         dt = 1.0 / sample_rate
-        freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=TAPER_ALPHA)
+        freqs, strain_f, df = time_to_freq(strain, dt, taper_alpha=taper_alpha)
         nyquist = sample_rate / 2.0
 
         times = np.arange(n) * dt
@@ -97,7 +191,7 @@ class GWLikelihood(BaseLikelihood):
         # Same taper as the strain above: the residual strain_f - template_f
         # must see identical windowing or the mismatch shows up as spurious
         # power at the band edges.
-        _, h_template_f, _ = time_to_freq(h_template, dt, taper_alpha=TAPER_ALPHA)
+        _, h_template_f, _ = time_to_freq(h_template, dt, taper_alpha=taper_alpha)
 
         band = self._band_mask(freqs, low_freq, high_freq, nyquist)
         if not np.any(band):
@@ -158,7 +252,11 @@ class GWLikelihood(BaseLikelihood):
         strain, meta, sample_rate, _, low_freq, high_freq = self._parse_data(
             data, context or {}
         )
-        freqs, strain_f, df = time_to_freq(strain, 1.0 / sample_rate, taper_alpha=TAPER_ALPHA)
+        taper_cfg = self.taper_config(data)
+        self.last_taper_config = taper_cfg
+        freqs, strain_f, df = time_to_freq(
+            strain, 1.0 / sample_rate, taper_alpha=taper_cfg["taper_alpha_used"]
+        )
         band = self._band_mask(freqs, low_freq, high_freq, sample_rate / 2.0)
         if not np.any(band):
             return self.ll_min
@@ -208,18 +306,42 @@ class GWLikelihood(BaseLikelihood):
         if f_rd < low_freq or f_rd > 0.95 * nyquist:
             return None
 
+        # The bounce burst sits at BOUNCE_BURST_FREQ_FACTOR * f_rd, so a
+        # ringdown inside the band can still put its burst below the low-
+        # frequency cutoff.  Reject those the same way, instead of leaving a
+        # blind spot where the template carries a component the inner product
+        # never sees.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.5.
+        f_burst = f_rd * BOUNCE_BURST_FREQ_FACTOR
+        if self.model_name == "bounce" and (
+            f_burst < low_freq or f_burst > 0.95 * nyquist
+        ):
+            return None
+
         h = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)
 
         if self.model_name == "bounce":
-            if "log10_A_bounce" in theta and "log10_tau_bounce_yr" in theta:
+            # Burst delay is measured from the merger in seconds
+            # (log10_dt_bounce_s), not converted from the cosmological
+            # lifetime log10_tau_bounce_yr.  Under the old parameterisation the
+            # shortest prior draw put the burst 3.156e+04 s after the merger,
+            # i.e. never inside a 4 s or 32 s segment (prior mass 0.0000), so
+            # the burst was a dead component.  See
+            # docs/BOUNCE_PREFLIGHT_AUDIT.md sections B.3 and D.1.
+            if "log10_A_bounce" in theta and "log10_dt_bounce_s" in theta:
                 A_b = float(10.0 ** theta["log10_A_bounce"])
-                from ..utils.constants import GYR_S
-                tau_s = float(10.0 ** theta["log10_tau_bounce_yr"] * GYR_S / 1e9)
-                t_bounce = t_merger + tau_s
-                if t_bounce < times[-1]:
-                    h += ringdown_waveform(
-                        times, t_bounce, A_b, f_rd * 0.8, max(2.0, q_rd * 0.5)
-                    )
+                dt_bounce = float(10.0 ** theta["log10_dt_bounce_s"])
+                t_bounce = t_merger + dt_bounce
+                if t_bounce >= times[-1]:
+                    # fail closed: a burst outside the segment is a template
+                    # this data cannot constrain, not a silent pure ringdown.
+                    return None
+                h = h + ringdown_waveform(
+                    times,
+                    t_bounce,
+                    A_b,
+                    f_burst,
+                    max(BOUNCE_BURST_Q_MIN, BOUNCE_BURST_Q_FACTOR * q_rd),
+                )
         return h
 
     @staticmethod

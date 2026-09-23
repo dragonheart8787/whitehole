@@ -24,6 +24,99 @@ from ..models.base import BaseModel
 
 logger = logging.getLogger(__name__)
 
+
+class SamplingBudgetExceeded(RuntimeError):
+    """A sampler run exceeded its wall-clock or likelihood-call budget.
+
+    Raised from inside the likelihood so the run stops promptly wherever it is,
+    rather than only at whatever checkpoint the sampler happens to offer.
+    Callers that score many runs (InjectionRecovery) already treat an exception
+    as a recorded failure, which is the fail-closed outcome: a run that ran out
+    of budget is reported as such, never as a converged posterior.
+    """
+
+
+class _BudgetGuard:
+    """Wall-clock and call-count budget for one sampler run.
+
+    Deliberately independent of dynesty's own ``maxcall``: bilby 2.8.2
+    overwrites ``sampler_kwargs["maxcall"]`` with its checkpoint chunk size
+    (``self.n_check_point``), so a caller-supplied value is silently discarded
+    and never limits anything.  Measured in docs/BOUNCE_PREFLIGHT_AUDIT.md
+    K.2.2, where a requested budget of 7e5 calls did not stop runs that reached
+    7.7e6 and 1.1e7 calls over 4.6 and 6.0 hours.
+    """
+
+    def __init__(
+        self,
+        max_seconds: float | None = None,
+        max_calls: int | None = None,
+        time_fn: Any = None,
+    ) -> None:
+        self.max_seconds = float(max_seconds) if max_seconds else None
+        self.max_calls = int(max_calls) if max_calls else None
+        self._time = time_fn or time.monotonic
+        self.calls = 0
+        self.started_at: float | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.max_seconds is not None or self.max_calls is not None
+
+    def start(self) -> "_BudgetGuard":
+        self.started_at = self._time()
+        self.calls = 0
+        return self
+
+    @property
+    def elapsed(self) -> float:
+        return 0.0 if self.started_at is None else self._time() - self.started_at
+
+    def check(self) -> None:
+        """Raise if either budget is spent.  Counts this call."""
+        if self.started_at is None:
+            self.start()
+        self.calls += 1
+        if self.max_calls is not None and self.calls > self.max_calls:
+            raise SamplingBudgetExceeded(
+                f"likelihood-call budget exhausted: {self.calls} > "
+                f"{self.max_calls} calls after {self.elapsed:.1f} s"
+            )
+        if self.max_seconds is not None and self.elapsed > self.max_seconds:
+            raise SamplingBudgetExceeded(
+                f"wall-clock budget exhausted: {self.elapsed:.1f} s > "
+                f"{self.max_seconds:.1f} s after {self.calls} likelihood calls"
+            )
+
+    def guard(self, fn: Any) -> Any:
+        """Return ``fn`` with a budget check in front of every call."""
+        if not self.active:
+            return fn
+
+        def _guarded(*args: Any, **kwargs: Any) -> Any:
+            self.check()
+            return fn(*args, **kwargs)
+
+        return _guarded
+
+
+def _taper_provenance(likelihood: BaseLikelihood, data: Any) -> dict[str, Any]:
+    """Audit record of the taper this run's likelihood applied, if any.
+
+    Only the GW likelihood has a taper; other channels contribute nothing
+    rather than a misleading null entry.  Keeping this in the run metadata is
+    what stops "this run skipped the taper because the data was mock" from
+    being invisible logic -- see GWLikelihood.taper_for_source().
+    """
+    resolver = getattr(likelihood, "taper_config", None)
+    if resolver is None:
+        return {}
+    try:
+        return dict(resolver(data))
+    except Exception:  # pragma: no cover - provenance must never break a run
+        logger.warning("Could not resolve taper provenance for run metadata")
+        return {}
+
 try:
     import bilby
     import dynesty  # noqa: F401
@@ -112,14 +205,37 @@ class BilbyRunner:
         Resume from a previous run if checkpoint exists.
     seed : int
         Random seed for reproducibility.
+    run_timeout_s : float | None
+        Wall-clock budget for a single run.  Enforced by raising
+        SamplingBudgetExceeded from inside the likelihood, because dynesty's
+        own ``maxcall`` is overwritten by bilby and cannot limit anything.
+    max_likelihood_calls : int | None
+        Likelihood-call budget for a single run, enforced the same way.
     sampler_kwargs : dict
         Additional keyword arguments passed to bilby.run_sampler().
+
+        Note on chain length: with ``sample="rwalk"`` (the default) the knob is
+        ``nact``, not ``walks``; ``walks`` is read only when
+        ``sample="acceptance-walk"``.  Passing ``walks`` alongside
+        ``sample="rwalk"`` has no effect whatsoever.
     """
 
+    #: Dynesty settings every run starts from.
+    #:
+    #: ``nact`` rather than ``walks`` is what sets the random-walk chain length
+    #: here.  With ``sample="rwalk"`` bilby 2.8.2 substitutes its own
+    #: ``AcceptanceTrackingRWalk``, whose chain length comes from ``nact``
+    #: (average accepted steps = 2 * nact); ``walks`` is read only by the
+    #: ``sample="acceptance-walk"`` branch.  This entry used to read
+    #: ``"walks": 32``, which therefore did nothing at all -- measured in
+    #: docs/BOUNCE_PREFLIGHT_AUDIT.md K.2.1, where walks=128 against walks=32
+    #: changed ncall by 4% and the 90% width by 2%.  ``nact=2`` is bilby's own
+    #: default, so removing the dead key does not change behaviour: runs made
+    #: before this edit had the same effective chain length.
     DEFAULT_DYNESTY_KWARGS: dict[str, Any] = {
         "bound": "live",
         "sample": "rwalk",
-        "walks": 32,
+        "nact": 2,
         "dlogz": 0.1,
     }
 
@@ -133,6 +249,8 @@ class BilbyRunner:
         force_toy: bool = False,
         dynesty_bound: str | None = None,
         dynesty_sample: str | None = None,
+        run_timeout_s: float | None = None,
+        max_likelihood_calls: int | None = None,
         **sampler_kwargs: Any,
     ) -> None:
         self.sampler = sampler
@@ -140,6 +258,10 @@ class BilbyRunner:
         self.outdir = Path(outdir)
         self.resume = resume
         self.seed = seed
+        # Enforced inside the likelihood, NOT via dynesty's maxcall, which
+        # bilby overwrites -- see _BudgetGuard.
+        self.run_timeout_s = run_timeout_s
+        self.max_likelihood_calls = max_likelihood_calls
         env_force = os.environ.get("WHITESEARCH_FORCE_TOY", "").strip().lower() in (
             "1", "true", "yes",
         )
@@ -170,7 +292,9 @@ class BilbyRunner:
         model : BaseModel (supplies bilby priors)
         label : str — unique label for this run
         """
-        if not model.parameter_names:
+        sampled_names = self.effective_parameter_names(model, likelihood)
+
+        if not sampled_names:
             return self._analytic_zero_parameter_evidence(
                 likelihood, data, context, model, label=label
             )
@@ -180,13 +304,16 @@ class BilbyRunner:
                 logger.warning("Using toy sampler (force_toy=True).")
             else:
                 logger.warning("Using toy sampler (bilby not installed).")
-            return self._toy_sampler(likelihood, data, context, model, label=label)
+            return self._toy_sampler(
+                likelihood, data, context, model, label=label,
+                sampled_names=sampled_names,
+            )
 
         t0 = time.time()
         self.outdir.mkdir(parents=True, exist_ok=True)
 
         bilby_likelihood = self._wrap_likelihood(likelihood, data, context)
-        priors = model.to_bilby_priors()
+        priors = self._restrict_priors(model.to_bilby_priors(), sampled_names)
 
         logger.info(
             "Running bilby/%s with %d live points for model=%s label=%s",
@@ -227,8 +354,19 @@ class BilbyRunner:
             "seed": self.seed,
             "sampler_kwargs": actual_kwargs,
             "requested_sampler_kwargs": requested_kwargs,
+            # Cumulative across resumes (dynesty's own ncall), so it is the
+            # behavioural check that a chain-length setting such as ``nact``
+            # actually reached the sampler -- a kwargs dict only shows what was
+            # requested.
+            "num_likelihood_evaluations": int(
+                getattr(result, "num_likelihood_evaluations", 0) or 0
+            ),
             "bound_fallback_occurred": bound_fallback is not None,
+            "sampled_parameters": list(sampled_names),
+            "model_parameters": list(model.parameter_names),
+            "likelihood_parameters": list(likelihood.parameter_names),
         }
+        metadata.update(_taper_provenance(likelihood, data))
         if bound_fallback is not None:
             metadata["bound_fallback_from"] = bound_fallback[0]
             metadata["bound_fallback_to"] = bound_fallback[1]
@@ -240,6 +378,61 @@ class BilbyRunner:
             log_likelihood_samples=ll_samples,
             metadata=metadata,
         )
+
+    @staticmethod
+    def effective_parameter_names(
+        model: BaseModel,
+        likelihood: BaseLikelihood,
+    ) -> list[str]:
+        """Parameters this run should actually sample.
+
+        The dimension of the sampled space belongs to the likelihood, not to
+        the model: a model may declare parameters that a given channel's
+        likelihood never reads.  ``BlackToWhiteBounce`` declares 12 (its
+        quantum-scale, lifetime-exponent and radio/gamma efficiency parameters
+        included) while ``GWLikelihood("bounce")`` reads 6, so building priors
+        from the model alone made dynesty explore 6 dead dimensions and
+        misreported the dimensionality of every calibration result.  See
+        docs/BOUNCE_PREFLIGHT_AUDIT.md section B.1.
+
+        Returns the model's parameters in model order, restricted to those the
+        likelihood declares.  A likelihood that declares no parameters imposes
+        no restriction (the previous behaviour), so channels whose likelihood
+        genuinely consumes the whole model parameter vector are unaffected.
+
+        Raises
+        ------
+        ValueError
+            If the likelihood declares a parameter the model does not provide.
+            That is a specification mismatch, not something to paper over with
+            a default value -- fail closed.
+        """
+        model_names = list(model.parameter_names)
+        wanted = list(likelihood.parameter_names)
+        if not wanted:
+            return model_names
+
+        missing = [p for p in wanted if p not in model_names]
+        if missing:
+            raise ValueError(
+                f"Likelihood {type(likelihood).__name__} requires parameter(s) "
+                f"{missing} that model {model.name!r} does not declare "
+                f"(model provides {model_names})."
+            )
+        return [p for p in model_names if p in wanted]
+
+    @staticmethod
+    def _restrict_priors(priors: Any, sampled_names: list[str]) -> Any:
+        """Drop prior entries for parameters this run does not sample."""
+        if set(priors) == set(sampled_names):
+            return priors
+        dropped = [p for p in priors if p not in sampled_names]
+        logger.info(
+            "Restricting priors to the likelihood's parameters; dropping %s",
+            dropped,
+        )
+        restricted = type(priors)({p: priors[p] for p in sampled_names})
+        return restricted
 
     def _run_dynesty(
         self,
@@ -347,14 +540,28 @@ class BilbyRunner:
         ws_ll = likelihood
         ws_data = data
         ws_ctx = context
+        guard = _BudgetGuard(
+            max_seconds=self.run_timeout_s,
+            max_calls=self.max_likelihood_calls,
+        )
+        self.last_budget_guard = guard
+
+        def _evaluate(parameters: dict[str, float]) -> float:
+            val = ws_ll.loglike(parameters, ws_data, ws_ctx)
+            return float(val) if np.isfinite(val) else -1e30
+
+        # The budget is checked here, on the one call every sampler has to make,
+        # rather than handed to dynesty as maxcall (which bilby discards).
+        evaluate = guard.guard(_evaluate)
+        if guard.active:
+            guard.start()
 
         class _Wrapper(bilby.core.likelihood.Likelihood):
             def __init__(self):
                 super().__init__(parameters=params)
 
             def log_likelihood(self) -> float:
-                val = ws_ll.loglike(self.parameters, ws_data, ws_ctx)
-                return float(val) if np.isfinite(val) else -1e30
+                return evaluate(self.parameters)
 
         return _Wrapper()
 
@@ -395,10 +602,19 @@ class BilbyRunner:
         model: BaseModel,
         label: str = "whitesearch",
         n_samples: int = 2000,
+        sampled_names: list[str] | None = None,
     ) -> InferenceResult:
         """Importance-sampling approximation when bilby is unavailable."""
         rng = np.random.default_rng(self.seed)
-        param_names = model.parameter_names
+        # Same restriction as the dynesty path: the calibrate CLI's "quick"
+        # profile runs with force_toy=True, so leaving the toy path
+        # unrestricted would keep reporting dead dimensions in exactly the
+        # reports this fix is meant to correct.
+        param_names = (
+            list(sampled_names)
+            if sampled_names is not None
+            else self.effective_parameter_names(model, likelihood)
+        )
         samples = []
         log_weights = []
 
@@ -421,7 +637,7 @@ class BilbyRunner:
 
         # Weighted posterior samples
         idx = rng.choice(n_samples, size=min(1000, n_samples), replace=True, p=weights)
-        posterior_rows = [samples[i] for i in idx]
+        posterior_rows = [{p: samples[i][p] for p in param_names} for i in idx]
         if param_names:
             posterior = pd.DataFrame(posterior_rows, columns=param_names)
         else:
@@ -438,5 +654,9 @@ class BilbyRunner:
                 "n_prior_samples": n_samples,
                 "label": label,
                 "seed": self.seed,
+                "sampled_parameters": list(param_names),
+                "model_parameters": list(model.parameter_names),
+                "likelihood_parameters": list(likelihood.parameter_names),
+                **_taper_provenance(likelihood, data),
             },
         )

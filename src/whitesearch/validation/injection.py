@@ -47,9 +47,20 @@ class InjectionRecoveryResult:
     credible_intervals : list[dict]
         90% credible intervals for each injection and parameter.
     coverage : dict[str, float]
-        Fraction of true values within the 90% CI (should be ~0.90).
+        Fraction of true values within the 90% CI (should be ~0.90).  Contains
+        only parameters that every injection actually sampled; see
+        ``unsampled_parameters`` / ``partially_sampled_parameters``.
     sbc_ranks : dict[str, list[int]]
-        SBC ranks per parameter across injections.
+        SBC ranks per parameter across injections, same key set as ``coverage``.
+    unsampled_parameters : list[str]
+        Injected parameters that no posterior contains.  A model may declare
+        parameters the channel's likelihood never reads (BlackToWhiteBounce
+        declares 12; GWLikelihood("bounce") reads 6), and coverage is simply
+        undefined for those -- it is not 1.0.
+    partially_sampled_parameters : list[str]
+        Injected parameters present in some posteriors but not all, e.g. when
+        an injection fell back to the failure placeholder below.  Excluded
+        rather than averaged over an inconsistent denominator.
     """
 
     theta_true: list[dict[str, float]]
@@ -59,10 +70,43 @@ class InjectionRecoveryResult:
     credible_intervals: list[dict[str, tuple[float, float]]]
     coverage: dict[str, float] = field(default_factory=dict)
     sbc_ranks: dict[str, list[int]] = field(default_factory=dict)
+    unsampled_parameters: list[str] = field(default_factory=list)
+    partially_sampled_parameters: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self._compute_coverage()
+
+    def coverage_of(self, param: str) -> float:
+        """Coverage fraction for one parameter.
+
+        Raises
+        ------
+        KeyError
+            If ``param`` was never sampled, was sampled by only some
+            injections, or was never injected at all.  Coverage is undefined
+            in those cases; this used to be answered with 1.0 because the
+            interval lookup fell back to ``(-inf, +inf)``, which counts every
+            true value as contained.  Callers that want to tolerate a missing
+            parameter should catch this explicitly.
+        """
+        if param in self.coverage:
+            return self.coverage[param]
+        if param in self.unsampled_parameters:
+            raise KeyError(
+                f"Coverage for {param!r} is undefined: no posterior contains it, "
+                "so it was declared by the model but never sampled "
+                "(the likelihood does not read it)."
+            )
+        if param in self.partially_sampled_parameters:
+            raise KeyError(
+                f"Coverage for {param!r} is undefined: only some injections "
+                "sampled it, so there is no consistent denominator."
+            )
+        raise KeyError(
+            f"Unknown parameter {param!r}; injected parameters are "
+            f"{sorted(self.theta_true[0]) if self.theta_true else []}."
+        )
 
     def _compute_coverage(self) -> None:
         n = len(self.theta_true)
@@ -70,31 +114,46 @@ class InjectionRecoveryResult:
             return
 
         param_names = list(self.theta_true[0].keys())
-        coverage: dict[str, float] = {}
-        sbc_ranks: dict[str, list[int]] = {p: [] for p in param_names}
 
-        for i, (theta, ci, post) in enumerate(
-            zip(self.theta_true, self.credible_intervals, self.posteriors)
+        # Partition the injected parameters by how many injections actually
+        # produced a credible interval for them.  Anything short of "all n"
+        # has no well-defined coverage, and must not be silently scored.
+        n_with_interval = {
+            p: sum(1 for ci in self.credible_intervals if p in ci) for p in param_names
+        }
+        coverable = [p for p in param_names if n_with_interval[p] == n]
+        self.unsampled_parameters = [p for p in param_names if n_with_interval[p] == 0]
+        self.partially_sampled_parameters = [
+            p for p in param_names if 0 < n_with_interval[p] < n
+        ]
+        if self.unsampled_parameters or self.partially_sampled_parameters:
+            logger.warning(
+                "Coverage undefined and therefore not reported for %s "
+                "(never sampled) and %s (sampled by only some injections).",
+                self.unsampled_parameters,
+                self.partially_sampled_parameters,
+            )
+
+        coverage: dict[str, float] = {p: 0.0 for p in coverable}
+        sbc_ranks: dict[str, list[int]] = {p: [] for p in coverable}
+
+        for theta, ci, post in zip(
+            self.theta_true, self.credible_intervals, self.posteriors
         ):
-            for p in param_names:
+            for p in coverable:
                 true_val = theta.get(p)
                 if true_val is None:
                     continue
-                # Coverage check
-                lo, hi = ci.get(p, (-np.inf, np.inf))
-                if p not in coverage:
-                    coverage[p] = 0
+                # No default: `coverable` guarantees the key is present, so a
+                # KeyError here would be a real inconsistency, not something to
+                # paper over with (-inf, +inf).
+                lo, hi = ci[p]
                 if lo <= true_val <= hi:
                     coverage[p] += 1.0
-                # SBC rank
                 if p in post.columns:
-                    rank = compute_sbc_rank(true_val, post[p].values)
-                    sbc_ranks[p].append(rank)
+                    sbc_ranks[p].append(compute_sbc_rank(true_val, post[p].values))
 
-        for p in param_names:
-            coverage[p] = coverage.get(p, 0) / n
-
-        self.coverage = coverage
+        self.coverage = {p: coverage[p] / n for p in coverable}
         self.sbc_ranks = sbc_ranks
 
     def summary(self) -> pd.DataFrame:
@@ -165,6 +224,7 @@ class InjectionRecovery:
             save_dir.mkdir(parents=True, exist_ok=True)
 
         theta_true_list = []
+        failed_indices: list[int] = []
         posteriors = []
         evidences = []
         evidence_errs = []
@@ -205,6 +265,11 @@ class InjectionRecovery:
                 )
             except Exception as exc:
                 logger.error("Injection %d failed: %s", i, exc)
+                failed_indices.append(i)
+                # Placeholder so the per-injection lists stay aligned.  Its
+                # posterior is a single row AT the true value, so its interval
+                # trivially contains the truth: metadata["failed_indices"]
+                # records which coverage entries include such a row.
                 result = InferenceResult(
                     log_evidence=-1e6,
                     log_evidence_err=1.0,
@@ -238,6 +303,8 @@ class InjectionRecovery:
                 "model": model.name,
                 "elapsed_s": elapsed,
                 "rng_seed": self.rng_seed,
+                "failed_indices": failed_indices,
+                "n_failed": len(failed_indices),
             },
         )
 

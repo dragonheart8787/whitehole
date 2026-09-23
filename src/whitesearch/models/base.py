@@ -164,7 +164,16 @@ class ParameterSpec:
                     unit=self.unit,
                 )
             case "cos_uniform":
-                return bp.Cosine(
+                # ``sample()`` above draws arccos(U(-1,1)), i.e. support
+                # [0, pi] with density proportional to sin(x) -- which bilby
+                # calls Sine, NOT Cosine.  bilby's Cosine is support
+                # [-pi/2, +pi/2] with density proportional to cos(x): a
+                # different distribution on a different interval, so 50% of
+                # prior draws fell outside the sampler's support and SBC
+                # ranks for inclination piled up at the upper bound.
+                return bp.Sine(
+                    minimum=0.0,
+                    maximum=float(np.pi),
                     name=self.name,
                     latex_label=self.latex or self.name,
                     unit=self.unit,
@@ -178,16 +187,61 @@ class ParameterSpec:
                     latex_label=self.latex or self.name,
                     unit=self.unit,
                 )
-            case "discrete_uniform":
-                return bp.DeltaFunction(
-                    peak=self.prior_kwargs["values"][0],
+            case "half_normal":
+                return bp.HalfNormal(
+                    sigma=self.prior_kwargs["sigma"],
                     name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
                 )
-            case _:
-                return bp.Uniform(
+            case "beta":
+                return bp.Beta(
+                    alpha=self.prior_kwargs["a"],
+                    beta=self.prior_kwargs["b"],
                     minimum=0.0,
                     maximum=1.0,
                     name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
+                )
+            case "discrete_uniform":
+                # bilby.core.prior.DiscreteValues is uniform over an arbitrary
+                # finite value set -- exactly what sample() does above -- and
+                # carries the matching prob / ln_prob / rescale, so no
+                # index<->value shim is needed in the model or likelihood layer.
+                #
+                # This previously returned DeltaFunction(values[0]), which
+                # silently pinned bounce's p_lifetime to 4 instead of sampling
+                # {4, 5}: under dynesty the parameter was never inferred at all.
+                values = list(self.prior_kwargs["values"])
+                if not values:
+                    raise ValueError(
+                        f"discrete_uniform prior for {self.name!r} has no values."
+                    )
+                discrete_values = getattr(bp, "DiscreteValues", None)
+                if discrete_values is None:
+                    # fail-closed on a bilby too old to express this prior,
+                    # rather than substituting a distribution nobody asked for.
+                    raise ImportError(
+                        "This bilby has no DiscreteValues prior, so "
+                        f"discrete_uniform (parameter {self.name!r}) cannot be "
+                        "translated faithfully. Upgrade bilby or add an "
+                        "explicit mapping."
+                    )
+                return discrete_values(
+                    values=values,
+                    name=self.name,
+                    latex_label=self.latex or self.name,
+                    unit=self.unit,
+                )
+            case _:
+                # fail-closed: never silently substitute Uniform(0, 1) for a
+                # prior we do not know how to translate.
+                raise ValueError(
+                    f"No bilby prior mapping for prior_type={self.prior_type!r} "
+                    f"(parameter {self.name!r}). Add an explicit case to "
+                    "ParameterSpec.to_bilby_prior() rather than relying on a "
+                    "default."
                 )
 
 

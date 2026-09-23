@@ -28,7 +28,15 @@ except ImportError:
     from scipy.signal import tukey  # type: ignore[attr-defined]
 
 from .base import BaseSimulator, SimData
-from ..utils.constants import G, C, M_SUN
+from ..utils.constants import (
+    G,
+    C,
+    M_SUN,
+    MPC_M,
+    BOUNCE_BURST_FREQ_FACTOR,
+    BOUNCE_BURST_Q_FACTOR,
+    BOUNCE_BURST_Q_MIN,
+)
 from ..utils.math_utils import ringdown_waveform, kerr_qnm_frequency, estimate_psd
 
 
@@ -155,7 +163,6 @@ class GravitationalWaveSimulator(BaseSimulator):
         # ── Derive waveform parameters ─────────────────────────────────────────
         M = params["M"]
         a = params["a_star"]
-        i = params.get("i", 0.0)
 
         f_gr, q_gr = kerr_qnm_frequency(M, a)
 
@@ -165,13 +172,40 @@ class GravitationalWaveSimulator(BaseSimulator):
         f_rd = f_gr * (1.0 + eps_f)
         q_rd = max(0.5, q_gr * (1.0 + eps_Q))
 
-        # Ringdown amplitude: h_0 ~ G M / (c^2 D_L)
-        D_L_m = params.get("D_L", 100.0) * 3.086e22
-        h0 = float(G * M * M_SUN / (C**2 * D_L_m))
-
-        # Antenna projection
-        fp, fc = antenna_response(i)
-        A_rd = h0 * np.sqrt(fp**2 + fc**2)
+        # ── Ringdown amplitude ────────────────────────────────────────────────
+        # Models carrying an explicit free amplitude (log10_A, i.e. the
+        # phenomenological bh_ringdown model) use it directly, byte-for-byte
+        # the same expression as GWLikelihood._build_template()'s bh_ringdown
+        # branch.  Deriving the amplitude from M/D_L/i here while the
+        # likelihood read 10**log10_A meant the simulator and the likelihood
+        # were different forward models, which invalidates SBC.
+        # Models that parameterise the amplitude physically (bounce: M, D_L,
+        # inclination) keep the distance/antenna path unchanged.
+        if "log10_A" in params:
+            amplitude_source = "log10_A"
+            A_rd = float(10.0 ** params["log10_A"])
+            h0 = A_rd
+        else:
+            amplitude_source = "M_D_L_inclination"
+            i = params.get("i", 0.0)
+            # utils.constants.MPC_M, not a rounded 3.086e22 literal: the
+            # likelihood template uses MPC_M, and the 1.0449e-04 relative
+            # difference between them made the injected and modelled
+            # amplitudes disagree by that factor.  Found by the burst-timing
+            # consistency test below, which compares the two waveforms sample
+            # for sample.
+            D_L_m = params.get("D_L", 100.0) * MPC_M
+            h0 = float(G * M * M_SUN / (C**2 * D_L_m))
+            # Plus polarisation only, matching
+            # GWLikelihood._build_template()'s A_rd = h0 * 0.5*(1 + cos^2 i)
+            # and matching ringdown_waveform(), whose docstring states it
+            # returns h_+ .  This previously used sqrt(fp^2 + fc^2), mixing the
+            # plus and cross amplitudes into a single real template: the
+            # injected amplitude was up to sqrt(2) = 1.4142 times what the
+            # likelihood modelled (face-on), which biased the recovered D_L by
+            # the same factor.  See docs/BOUNCE_PREFLIGHT_AUDIT.md section B.4.
+            fp, _fc = antenna_response(i)
+            A_rd = h0 * fp
 
         # ── Build signal ───────────────────────────────────────────────────────
         h_plus = ringdown_waveform(times, t_merger, A_rd, f_rd, q_rd)
@@ -183,14 +217,24 @@ class GravitationalWaveSimulator(BaseSimulator):
         else:
             A_b = 0.0
 
-        tau_bounce_s = params.get("log10_tau_bounce_yr", None)
-        if tau_bounce_s is not None and A_b > 0:
-            from ..utils.constants import GYR_S
-            tau_s = float(10.0 ** tau_bounce_s * GYR_S / 1e9)
-            t_bounce_event = t_merger + tau_s
-            if t_bounce_event < duration:
+        # Burst delay is measured from the merger in seconds, the same
+        # definition GWLikelihood._build_template() uses -- and the same
+        # BOUNCE_BURST_* factors -- so the injected burst and the fitted burst
+        # are one forward model.  The previous code converted
+        # log10_tau_bounce_yr (a cosmological lifetime, in YEARS) to seconds,
+        # which put the burst at least 3.156e+04 s after the merger and so
+        # never inside the segment.  See docs/BOUNCE_PREFLIGHT_AUDIT.md D.1.
+        log10_dt_bounce = params.get("log10_dt_bounce_s", None)
+        if log10_dt_bounce is not None and A_b > 0:
+            t_bounce_event = t_merger + float(10.0 ** log10_dt_bounce)
+            # Same guard as the template's (times[-1], not duration).
+            if t_bounce_event < times[-1]:
                 h_plus += ringdown_waveform(
-                    times, t_bounce_event, A_b, f_rd * 0.8, max(2.0, q_rd * 0.5)
+                    times,
+                    t_bounce_event,
+                    A_b,
+                    f_rd * BOUNCE_BURST_FREQ_FACTOR,
+                    max(BOUNCE_BURST_Q_MIN, BOUNCE_BURST_Q_FACTOR * q_rd),
                 )
 
         # ── Taper the signal ──────────────────────────────────────────────────
@@ -217,7 +261,19 @@ class GravitationalWaveSimulator(BaseSimulator):
                 "f_rd": f_rd,
                 "q_rd": q_rd,
                 "h0": h0,
+                "A_rd": A_rd,
+                "amplitude_source": amplitude_source,
                 "low_freq_cutoff": low_freq,
+                # Provenance tag, same field dataio/gw_observation.py and
+                # dataio/gwosc.py use ("GWOSC", "MOCK_EXPLICIT", "MOCK",
+                # "MOCK_FALLBACK").  This path is distinct from all of those:
+                # "psd" below is the exact analytic spectrum the noise was
+                # generated from, on the same un-windowed basis as the
+                # likelihood's rfft, so there is no Welch-vs-rectangular
+                # window mismatch for a taper to correct.  GWLikelihood reads
+                # this tag to decide; see taper_for_source() there and
+                # docs/BOUNCE_PREFLIGHT_AUDIT.md Part H.
+                "source": "MOCK_SIMULATOR",
             },
             params_true=params,
             noise_realisation=noise,

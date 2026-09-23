@@ -1,0 +1,7 @@
+parameter,n,rank_mean,rank_mean_expected,rank_sd,rank_sd_expected,ks_pvalue,passes_bonferroni,coverage_68,coverage_68_expected,coverage_90,coverage_90_expected
+M,19,50.53,50.0,30.1,29.15,0.974,True,0.632,0.673,0.789,0.891
+a_star,19,56.68,50.0,29.03,29.15,0.7215,True,0.632,0.673,0.842,0.891
+i,19,57.89,50.0,36.09,29.15,0.1845,True,0.474,0.673,0.579,0.891
+position_angle,19,45.0,50.0,29.32,29.15,0.7215,True,0.579,0.673,0.895,0.891
+ring_width_frac,19,41.63,50.0,28.73,29.15,0.2563,True,0.737,0.673,0.842,0.891
+log10_total_flux_jy,19,66.53,50.0,29.71,29.15,0.017,True,0.474,0.673,0.737,0.891

@@ -1,0 +1,7 @@
+parameter,n,rank_mean,rank_mean_expected,rank_sd,rank_sd_expected,extreme_rank_frac,extreme_rank_frac_expected,ks_pvalue,passes_bonferroni,coverage_68,coverage_68_expected,coverage_68_sigma,coverage_90,coverage_90_expected,coverage_90_sigma
+M,94,56.78,50.0,26.88,29.15,0.117,0.109,0.04777,True,0.702,0.673,0.6,0.883,0.891,-0.25
+a_star,94,44.39,50.0,30.07,29.15,0.191,0.109,0.23609,True,0.596,0.673,-1.6,0.809,0.891,-2.57
+i,94,47.02,50.0,34.11,29.15,0.287,0.109,0.01937,True,0.489,0.673,-3.8,0.713,0.891,-5.55
+position_angle,94,52.35,50.0,33.25,29.15,0.234,0.109,0.03287,True,0.457,0.673,-4.46,0.766,0.891,-3.89
+ring_width_frac,94,45.51,50.0,30.95,29.15,0.213,0.109,0.09704,True,0.617,0.673,-1.16,0.798,0.891,-2.9
+log10_total_flux_jy,94,62.22,50.0,28.02,29.15,0.17,0.109,0.00158,False,0.606,0.673,-1.38,0.83,0.891,-1.91

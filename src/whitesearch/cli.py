@@ -69,7 +69,11 @@ def main():
 @click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
 @click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
 @click.option("--dynesty-bound", default="live", show_default=True)
-@click.option("--dynesty-sample", default="rwalk", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True,
+              help="dynesty sample method. Chain length is set by nact for "
+                   "'rwalk'/'act-walk' and by walks only for "
+                   "'acceptance-walk' -- passing walks with 'rwalk' has no "
+                   "effect (see BilbyRunner.DEFAULT_DYNESTY_KWARGS).")
 @_allow_mock_opt
 def fit(
     model, channel, data, event, inject_model, config, nlive, outdir, seed, resume,
@@ -123,7 +127,11 @@ def fit(
 @click.option("--likelihood-mode", "likelihood_mode", type=click.Choice(["mf", "full"]), default="mf", show_default=True)
 @click.option("--reference-amplitude/--no-reference-amplitude", default=False, show_default=True)
 @click.option("--dynesty-bound", default="live", show_default=True)
-@click.option("--dynesty-sample", default="rwalk", show_default=True)
+@click.option("--dynesty-sample", default="rwalk", show_default=True,
+              help="dynesty sample method. Chain length is set by nact for "
+                   "'rwalk'/'act-walk' and by walks only for "
+                   "'acceptance-walk' -- passing walks with 'rwalk' has no "
+                   "effect (see BilbyRunner.DEFAULT_DYNESTY_KWARGS).")
 @_allow_mock_opt
 def compare(
     model, null_model, alt_model, channel, data, event, inject_model, config,
@@ -260,15 +268,15 @@ def rank(models, reference, channel, data, event, inject_model, nlive, outdir, s
 @click.option("--seed", default=42, show_default=True)
 def inject(model, channel, n_injections, nlive, outdir, seed):
     """Run injection / recovery and print coverage statistics."""
-    from whitesearch.models import get_model
+    from whitesearch.models import model_for_context
     from whitesearch.simulators import get_simulator
     from whitesearch.inference import BilbyRunner
     from whitesearch.validation import InjectionRecovery
 
-    model_obj = get_model(model)
+    context = _default_context(channel)
+    model_obj = model_for_context(model, context)
     sim = get_simulator(channel)
     ll = _get_likelihood(channel, model)
-    context = _default_context(channel)
 
     runner = BilbyRunner(nlive=nlive, outdir=f"{outdir}/bilby", seed=seed)
     ir = InjectionRecovery(simulator=sim, runner=runner, n_injections=n_injections, rng_seed=seed)
@@ -288,18 +296,18 @@ def inject(model, channel, n_injections, nlive, outdir, seed):
 @click.option("--seed", default=42, show_default=True)
 def sensitivity(model, channel, param, n_injections, outdir, seed):
     """Generate sensitivity curves for a model parameter."""
-    from whitesearch.models import get_model
+    from whitesearch.models import model_for_context
     from whitesearch.simulators import get_simulator
     from whitesearch.inference import BilbyRunner
     from whitesearch.validation import InjectionRecovery
     from whitesearch.validation.sensitivity import SensitivityAnalyzer
 
-    model_obj = get_model(model)
+    context = _default_context(channel)
+    model_obj = model_for_context(model, context)
     if param is None:
         param = model_obj.parameter_names[0]
     sim = get_simulator(channel)
     ll = _get_likelihood(channel, model)
-    context = _default_context(channel)
 
     runner = BilbyRunner(nlive=100, outdir=f"{outdir}/bilby", seed=seed)
     ir = InjectionRecovery(simulator=sim, runner=runner, n_injections=n_injections, rng_seed=seed)
@@ -418,9 +426,9 @@ def _run_single_fit(
     dynesty_bound: str = "live",
     dynesty_sample: str = "rwalk",
 ):
-    from whitesearch.models import get_model
+    from whitesearch.models import model_for_context
 
-    model_obj = get_model(model)
+    model_obj = model_for_context(model, context)
     ll = _get_likelihood(channel, model, likelihood_mode=likelihood_mode)
     label = label_suffix or f"{model}_{channel}_{event or data}"
     runner = BilbyRunner(
@@ -587,8 +595,20 @@ def _default_context(channel: str) -> dict:
             "t_start_s": 0.1, "t_end_s": 0.3, "tsys_jy": 1000.0, "t_samp_ms": 0.1, "rng_seed": 42,
         },
         "xray": {"area_cm2": 1000.0, "bg_rate_cps": 0.5, "duration_s": 100.0, "dt_s": 1.0, "rng_seed": 42},
-        "image": {"fov_muas": 200.0, "n_pixels": 64, "freq_ghz": 230.0, "thermal_noise_jy": 0.05, "rng_seed": 42},
     }
+    if channel == "image":
+        # The imaging grid comes from configs/instruments/eht.yaml, not from a
+        # second copy here.  cli.py used to hardcode n_pixels: 64 against the
+        # YAML's 128, and at 64 px neither EHT target's ring is representable
+        # at all.  See dataio.eht.eht_imaging_config().
+        from whitesearch.dataio.eht import eht_imaging_config
+
+        # 'target' is declared explicitly rather than defaulted inside the
+        # image code: it fixes the source distance, which this channel holds
+        # constant instead of sampling.  M87* is this project's primary EHT
+        # target; analysing Sgr A* means setting it to 'SgrA*' here or in the
+        # run config, not relying on a fallback -- there is none.
+        return {"target": "M87*", "rng_seed": 42, **eht_imaging_config()}
     return contexts.get(channel, {})
 
 
@@ -596,26 +616,16 @@ def _get_likelihood(channel: str, model: str, *, likelihood_mode: str = "full"):
     from whitesearch.likelihoods import (
         GWLikelihood, RadioBurstLikelihood, XRayBurstLikelihood, VisibilityLikelihood,
     )
-    from whitesearch.models import get_model
+    from whitesearch.models import check_model_channel
 
-    model_channel = get_model(model).channel
-    compatible = {
-        "gw": {"gw", "generic"},
-        "radio": {"radio", "generic"},
-        "xray": {"xray", "radio", "generic"},
-        "image": {"image", "generic"},
-    }
-    if model_channel not in compatible.get(channel, set()):
-        raise ValueError(
-            f"Model '{model}' (native channel={model_channel}) "
-            f"cannot be fit on data channel '{channel}'"
-        )
+    # Same table the injection side now uses; see models.CHANNEL_COMPATIBILITY.
+    check_model_channel(model, channel)
     use_full = likelihood_mode == "full"
     return {
         "gw": GWLikelihood(model, use_full_likelihood=use_full),
         "radio": RadioBurstLikelihood(model),
         "xray": XRayBurstLikelihood(model),
-        "image": VisibilityLikelihood(),
+        "image": VisibilityLikelihood(model),
     }[channel]
 
 

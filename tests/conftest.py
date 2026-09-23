@@ -39,7 +39,9 @@ def pbh_model():
 
 @pytest.fixture
 def gr_model():
-    return GREternalWhiteHole()
+    # The image channel holds the source distance fixed per target, so the
+    # model has to be told which target it describes.
+    return GREternalWhiteHole(target="M87*")
 
 
 @pytest.fixture
@@ -65,6 +67,7 @@ def bounce_params():
         "M": 60.0,
         "a_star": 0.6,
         "log10_tau_bounce_yr": 5.0,
+        "log10_dt_bounce_s": -1.0,
         "log10_ell_q": 3.0,
         "p_lifetime": 4,
         "eps_f": 0.05,
@@ -98,13 +101,14 @@ def gr_params():
     return {
         "M": 6.5e9,
         "a_star": 0.5,
-        "D_L": 16.8,
         "i": 1.1,
         "position_angle": 0.8,
         "log10_ne": -3.0,
         "log10_B": -5.0,
         "ring_width_frac": 0.1,
-        "log10_brightness": 0.5,
+        # gr_eternal samples the ring's INTEGRATED flux, not its peak surface
+        # brightness; 10^0 = 1 Jy sits inside M87*'s measured 0.5-1.2 Jy.
+        "log10_total_flux_jy": 0.0,
     }
 
 
@@ -156,6 +160,7 @@ def radio_context():
 @pytest.fixture
 def image_context():
     return {
+        "target": "M87*",
         "fov_muas": 200.0,
         "n_pixels": 32,
         "freq_ghz": 230.0,

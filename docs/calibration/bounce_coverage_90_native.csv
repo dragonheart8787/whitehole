@@ -1,0 +1,13 @@
+parameter,coverage_90pct,coverage_ok,sbc_n,sbc_rank_mean,sbc_rank_std
+M,0.905,True,200,363.045,230.184454242679
+a_star,0.855,True,200,384.25,246.52305673100844
+log10_tau_bounce_yr,1.0,True,0,,
+log10_ell_q,1.0,True,0,,
+p_lifetime,1.0,True,0,,
+eps_f,0.895,True,200,356.685,238.4523343878185
+eps_Q,0.885,True,200,378.44,236.2808633808502
+log10_A_bounce,1.0,True,0,,
+D_L,0.905,True,200,378.845,243.5603025433332
+i,0.875,True,200,404.275,238.70332920803597
+eta_r,1.0,True,0,,
+eta_gamma,1.0,True,0,,

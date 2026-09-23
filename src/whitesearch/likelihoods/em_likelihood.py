@@ -33,19 +33,46 @@ class RadioBurstLikelihood(BaseLikelihood):
 
     @property
     def parameter_names(self) -> list[str]:
+        """Parameters this channel actually infers, per model.
+
+        An explicit branch per model, because the previous fallthrough handed
+        every unlisted model the magnetar list: grb_frb then claimed three
+        parameters it does not declare and omitted ones it does, so
+        BilbyRunner.effective_parameter_names() refused to build priors for it
+        at all.  See docs/RADIO_PREFLIGHT_AUDIT.md R.5.
+        """
         if self.model_name == "null":
             return []
         if self.model_name == "pbh_tunneling":
+            # log10_f_pbh (PBH dark-matter fraction) and log10_k_tunnel
+            # (tunneling coefficient) are rate/lifetime parameters: they set
+            # how often such an event happens, not what a single burst looks
+            # like, so a single-burst dynamic spectrum carries no information
+            # about them.  Dropped from the sampled set rather than sampled
+            # flat, the same treatment bounce's burst parameters got in
+            # BOUNCE_PREFLIGHT_AUDIT.md B3-3.  The model still declares them.
             return [
-                "log10_M_g", "log10_f_pbh", "log10_k_tunnel",
-                "log10_eta_r", "z", "DM_host",
+                "log10_M_g", "log10_eta_r", "z", "DM_host",
                 "log10_W_int_ms", "log10_tau_sc_ms", "spectral_index",
             ]
-        # magnetar_flare
-        return [
-            "log10_fluence_jy_ms", "log10_W_ms", "DM",
-            "log10_tau_sc_ms", "spectral_index",
-        ]
+        if self.model_name == "grb_frb":
+            # What GRBAfterglowFRB declares AND EMBurstSimulator reads.
+            # log10_T90_s is excluded: the radio simulator has no burst-
+            # duration concept to attach it to.  'z' is excluded because
+            # grb_frb declares DM directly, so _get_dm() takes that total and
+            # z has no remaining route into the dynamic spectrum -- see the
+            # note in docs/RADIO_PREFLIGHT_AUDIT.md R.5.
+            return ["log10_fluence_jy_ms", "spectral_index", "DM"]
+        if self.model_name == "magnetar":
+            return [
+                "log10_fluence_jy_ms", "log10_W_int_ms", "DM",
+                "log10_tau_sc_ms", "spectral_index",
+            ]
+        raise ValueError(
+            f"RadioBurstLikelihood has no parameter list for model "
+            f"{self.model_name!r}. Add an explicit branch rather than "
+            f"inheriting another model's parameters."
+        )
 
     def loglike(
         self,

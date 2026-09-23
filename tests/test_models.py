@@ -75,7 +75,9 @@ class TestBlackToWhiteBounce:
     def test_sample_prior_in_support(self, bounce_model, rng):
         for _ in range(20):
             params = bounce_model.sample_prior(rng)
-            assert 5.0 <= params["M"] <= 1000.0
+            # bounded so both f_QNM*(1+eps_f) and the burst at 0.8*that stay
+            # in the analysis band; see _m_prior_bounds_for_band()
+            assert 25.0 <= params["M"] <= 330.0
             assert 0.0 <= params["a_star"] <= 0.998
             assert -0.3 <= params["eps_f"] <= 0.3
 
@@ -90,6 +92,9 @@ class TestBlackToWhiteBounce:
         assert "f_mod_hz" in stats
         assert "delta_f_hz" in stats
         assert "tau_bounce_s" in stats
+        # the observable burst delay, distinct from the cosmological lifetime
+        assert "dt_bounce_s" in stats
+        assert "f_burst_hz" in stats
 
     def test_frequency_positive(self, bounce_model, bounce_params):
         stats = bounce_model.summary_stats(bounce_params)
@@ -151,10 +156,9 @@ class TestAlternativeModels:
         assert "DM" in magnetar_model.parameter_names
 
     def test_bh_ringdown_eps_zero(self, bh_ringdown_model):
-        params = {
-            "M": 60.0, "a_star": 0.6,
-            "log10_A": -22.0, "D_L": 100.0, "i": 0.3,
-        }
+        # Free-amplitude phenomenological ringdown: M, a_star, log10_A only.
+        # D_L / i were removed because the GW likelihood never read them.
+        params = {"M": 60.0, "a_star": 0.6, "log10_A": -22.0}
         stats = bh_ringdown_model.summary_stats(params)
         assert stats["delta_f_hz"] == 0.0
         assert stats["delta_Q"] == 0.0

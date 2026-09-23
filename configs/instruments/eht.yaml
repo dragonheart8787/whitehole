@@ -20,7 +20,17 @@ targets:
     shadow_diameter_muas: 42.0  # from 2019 papers
 
 imaging:
-  fov_muas: 200.0
+  # Half-width of the image, in muas.  Sized to the sources: M87* and Sgr A*
+  # have ring radii of ~20 and ~26 muas, so a 200 muas half-width (400 muas
+  # field) was ~10x too large and its 3.125 muas pixels could not represent a
+  # thin ring at either target -- only 13.29% of M87*'s mass prior and 52.39%
+  # of Sgr A*'s landed above the representability floor.  At 50 muas both are
+  # 100% representable, and the largest ring the priors allow (31.06 muas)
+  # still sits well inside the field.  See docs/XRAY_IMAGE_PREFLIGHT_AUDIT.md
+  # X.13.2.  This block is the single source of truth: cli.py reads it via
+  # dataio.eht.eht_imaging_config(), and tests/test_image_forward_model.py
+  # pins models.gr_eternal's IMAGE_* constants against it.
+  fov_muas: 50.0
   n_pixels: 128
   beam_fwhm_muas: 20.0
   thermal_noise_jy: 0.05
